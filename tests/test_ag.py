@@ -86,7 +86,7 @@ def test_ag_acha_o_otimo_da_forca_bruta_em_10_sementes():
         assert resultado.aptidao == pytest.approx(aptidao_otima, abs=1.0), semente
 
 
-def test_nenhum_individuo_tem_menos_de_3_horas_entre_refeicoes():
+def test_nenhum_individuo_avaliado_tem_menos_de_3_horas_entre_refeicoes_nem_jantar_apos_23h():
     dados = dados_sinteticos(3, semente=1)
     config_mutacao_maxima = ag.ConfigAG(taxa_mutacao_gaussiana=1.0, sigma_relativo_inicial=1.0)
 
@@ -105,8 +105,23 @@ def test_nenhum_individuo_tem_menos_de_3_horas_entre_refeicoes():
         relogio = refeicoes["dia"].to_numpy() * 24 + refeicoes["horario"].to_numpy()
         intervalos = np.diff(relogio.reshape(-1, plano.N_REFEICOES), axis=1)
         assert intervalos.min() >= 3.0 - 1e-9
+        jantares = refeicoes.loc[refeicoes["tipo"] == "jantar", "horario"]
+        assert jantares.max() <= plano.HORA_MAXIMA_JANTAR
         assert len(avaliados) == len(resultado.historico)
         assert len(refeicoes) == resultado.avaliacoes * plano.N_REFEICOES
+
+
+def test_cantos_dos_limites_decodificam_jantar_ate_23h_e_intervalos_de_3_horas_ou_mais():
+    minimos, maximos = plano.limites_intervalo()
+    cantos = np.array(list(itertools.product((0, 1), repeat=plano.N_REFEICOES)))
+    intervalo = np.where(cantos == 1, maximos, minimos)
+    pop = plano.Populacao(np.zeros_like(cantos), intervalo, np.zeros(cantos.shape))
+
+    por_dia_e_tipo = plano.horarios(pop).reshape(len(pop), -1, len(TIPOS_REFEICAO))
+
+    jantares = por_dia_e_tipo[:, :, TIPOS_REFEICAO.index("jantar")]
+    assert jantares.max() == plano.HORA_MAXIMA_JANTAR
+    assert np.diff(por_dia_e_tipo, axis=2).min() >= 3.0
 
 
 def test_penalidade_de_kcal_mantem_d9_perto_do_habito():

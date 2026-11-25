@@ -3,19 +3,20 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from glicose.esquema import DIAS_PLANO, ENTRADA_SIMULADOR, MACROS, TIPOS_REFEICAO, conformar
+from glicose.esquema import (
+    DIAS_PLANO,
+    ENTRADA_SIMULADOR,
+    HORAS_DESDE_REFEICAO_ANTERIOR,
+    MACROS,
+    TIPOS_REFEICAO,
+    conformar,
+)
 
 REFEICOES_PLANO = tuple((dia, tipo) for dia in DIAS_PLANO for tipo in TIPOS_REFEICAO)
 N_REFEICOES = len(REFEICOES_PLANO)
 
-# O gene do café é a hora do dia, e os do almoço e do jantar são horas desde a refeição anterior.
-# Os limites vão do percentil 5 ao 95 das refeições reais do CGMacros, com o piso de 3 horas do
-# protocolo. A caminhada vai de 0 a 30 minutos, como no plano do projeto.
-LIMITES_HORARIO = {
-    "cafe": (6.0, 10.5),
-    "almoco": (3.0, 6.5),
-    "jantar": (3.0, 8.5),
-}
+# 99% dos jantares reais do CGMacros acontecem antes de 22,9 horas (Apêndice A do plano).
+HORA_MAXIMA_JANTAR = 23.0
 LIMITES_CAMINHADA = (0.0, 30.0)
 
 
@@ -49,8 +50,8 @@ class Populacao:
 
 
 def limites_intervalo() -> tuple[np.ndarray, np.ndarray]:
-    minimos = np.array([LIMITES_HORARIO[tipo][0] for _, tipo in REFEICOES_PLANO])
-    maximos = np.array([LIMITES_HORARIO[tipo][1] for _, tipo in REFEICOES_PLANO])
+    por_refeicao = np.array([HORAS_DESDE_REFEICAO_ANTERIOR[tipo] for _, tipo in REFEICOES_PLANO])
+    _, minimos, maximos = por_refeicao.T
     return minimos, maximos
 
 
@@ -77,12 +78,21 @@ def macros_habito(perfil: pd.Series, cardapio: pd.DataFrame) -> np.ndarray:
 
 
 def horarios(pop: Populacao) -> np.ndarray:
+    """Decodifica os genes de intervalo em horas do dia.
+
+    O gene do café já é a hora do dia. Os do almoço e do jantar são horas desde a refeição
+    anterior, e o jantar usa só o intervalo que ainda cabe antes de HORA_MAXIMA_JANTAR.
+    """
     horario = np.empty_like(pop.intervalo)
     for j, (_, tipo) in enumerate(REFEICOES_PLANO):
         if tipo == "cafe":
             horario[:, j] = pop.intervalo[:, j]
-        else:
-            horario[:, j] = horario[:, j - 1] + pop.intervalo[:, j]
+            continue
+        anterior = horario[:, j - 1]
+        intervalo = pop.intervalo[:, j]
+        if tipo == "jantar":
+            intervalo = np.minimum(intervalo, HORA_MAXIMA_JANTAR - anterior)
+        horario[:, j] = anterior + intervalo
     return horario
 
 
