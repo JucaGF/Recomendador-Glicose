@@ -24,6 +24,7 @@ def montar_perfil(kcal_dia: float, proteina_dia: float, habito_por_tipo: dict) -
     for tipo, horario in zip(TIPOS_REFEICAO, (8.0, 12.5, 19.0), strict=True):
         colunas |= {f"{m}_{tipo}": valor for m, valor in habito_por_tipo[tipo].items()}
         colunas[f"horario_{tipo}"] = horario
+        colunas[f"caminhada_{tipo}"] = 0.0
     return pd.Series(
         {
             "participante": 1,
@@ -310,14 +311,14 @@ def test_menos_carbo_sem_dia_que_caiba_fica_o_de_menor_penalidade_e_menos_carbo(
     assert pratos_por_dia(escolhido) == [[1, 0, 0]] * 3
 
 
-def test_menos_carbo_mantem_o_horario_do_habito_e_nao_caminha():
+def test_menos_carbo_mantem_o_horario_e_a_caminhada_do_habito():
     dados = dados_sinteticos(3, semente=5)
     for _, perfil in dados["perfis"].iterrows():
         escolhido = otimizadores.menos_carbo(perfil, dados["cardapio"])
         habito = otimizadores.habito(perfil, dados["cardapio"])
 
         assert escolhido.intervalo.tolist() == habito.intervalo.tolist()
-        assert (escolhido.caminhada == 0).all()
+        assert escolhido.caminhada.tolist() == habito.caminhada.tolist()
 
 
 def horarios_por_chamada(otimizador) -> list[np.ndarray]:
