@@ -18,7 +18,7 @@ COBERTURA_MINIMA_JANELA = 0.9
 # sensor, e não da glicose no momento da refeição.
 IDADE_MAXIMA_BASE = pd.Timedelta(minutes=20)
 # 3 METs é o limite de atividade moderada da OMS. Os 11 participantes que só têm Intensity
-# ficam sem atividade: Intensity de 2 ou mais deu mediana de 0 minutos contra 11 com METs.
+# ficam sem atividade, porque a escala do Intensity não se compara com METs.
 METS_ATIVO = 3
 # Às 5h a última refeição foi horas antes. A média dessa janela teve correlação de 0,81 com a
 # glicose de jejum do laboratório no protótipo.
@@ -71,7 +71,9 @@ def dia_do_estudo(dias: pd.DataFrame, inicio: pd.Timestamp) -> int | None:
     return None if encontrado.empty else int(encontrado.iloc[0])
 
 
-def refeicoes_participante(pid: int, tabela: pd.DataFrame, dias: pd.DataFrame) -> pd.DataFrame:
+def refeicoes_participante(
+    participante: int, tabela: pd.DataFrame, dias: pd.DataFrame
+) -> pd.DataFrame:
     nativas = {sensor: leitura.leituras_nativas(tabela[sensor]) for sensor in ("dexcom", "libre")}
     registros = tabela[tabela["refeicao"].notna()]
     linhas = []
@@ -87,7 +89,7 @@ def refeicoes_participante(pid: int, tabela: pd.DataFrame, dias: pd.DataFrame) -
         libre = resposta(nativas["libre"], tabela["libre"], inicio)
         linhas.append(
             {
-                "participante": pid,
+                "participante": participante,
                 "dia": dia,
                 "tipo": registro["refeicao"],
                 "horario": inicio.hour + inicio.minute / 60,
@@ -103,7 +105,7 @@ def refeicoes_participante(pid: int, tabela: pd.DataFrame, dias: pd.DataFrame) -
     return pd.DataFrame(linhas)
 
 
-def resumo_dias(pid: int, tabela: pd.DataFrame, dias: pd.DataFrame) -> pd.DataFrame:
+def resumo_dias(participante: int, tabela: pd.DataFrame, dias: pd.DataFrame) -> pd.DataFrame:
     principais = tabela[tabela["refeicao"].isin(leitura.TIPOS_REFEICAO.values())]
     dexcom = leitura.leituras_nativas(tabela["dexcom"])
     jejum = dexcom.between_time(*JEJUM, inclusive="left")
@@ -115,17 +117,17 @@ def resumo_dias(pid: int, tabela: pd.DataFrame, dias: pd.DataFrame) -> pd.DataFr
             "glicose_jejum_cgm": jejum.groupby(jejum.index.normalize()).mean(),
         }
     )
-    return dias.join(por_data, on="data").assign(participante=pid)
+    return dias.join(por_data, on="data").assign(participante=participante)
 
 
 def montar_tabelas() -> tuple[pd.DataFrame, pd.DataFrame]:
     grupos = leitura.ler_grupos()
     refeicoes, dias = [], []
-    for pid in leitura.participantes():
-        tabela = leitura.ler_participante(pid)
+    for participante in leitura.participantes():
+        tabela = leitura.ler_participante(participante)
         validos = leitura.dias_validos(tabela)
-        refeicoes.append(refeicoes_participante(pid, tabela, validos))
-        dias.append(resumo_dias(pid, tabela, validos))
+        refeicoes.append(refeicoes_participante(participante, tabela, validos))
+        dias.append(resumo_dias(participante, tabela, validos))
     refeicoes = pd.concat(refeicoes, ignore_index=True)
     refeicoes["grupo"] = refeicoes["participante"].map(grupos)
     return conformar(refeicoes, REFEICOES), conformar(pd.concat(dias, ignore_index=True), DIAS)
