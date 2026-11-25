@@ -6,13 +6,20 @@ from glicose.ag_hiper import (
     ConfigBusca,
     corte_keras,
     cruzar,
+    estimador,
     mutar,
     preparar_dados,
     rodar_buscas,
     sortear,
 )
 from glicose.esquema import DIAS_HABITO, DIAS_PLANO, dados_sinteticos
-from glicose.simulador import ConfigRede, particao_do_estudo
+from glicose.simulador import (
+    ATRIBUTOS,
+    COLUNA_CAMINHADA,
+    COLUNA_CARBO,
+    ConfigRede,
+    particao_do_estudo,
+)
 
 N_PARTICIPANTES = 15
 N_SORTEIOS = 2000
@@ -105,3 +112,16 @@ def test_folds_separam_participantes_e_dias(dados, sinteticos):
         assert set(ajuste).isdisjoint(validacao)
         testados.extend(participantes[teste])
     assert sorted(set(testados)) == sorted(sinteticos["perfis"]["participante"])
+
+
+def test_a_rede_le_carbo_e_caminhada_na_posicao_de_atributos(dados):
+    assert list(dados.atributos.columns) == list(ATRIBUTOS)
+
+    sem_caminhada = dados.atributos.assign(minutos_ativos_60=np.nan)
+    preparo = estimador().regressor[:-1]
+    entradas = preparo.fit_transform(sem_caminhada)
+    carbo = sem_caminhada["carbo"].to_numpy()
+
+    assert entradas.shape[1] == len(ATRIBUTOS)
+    assert np.corrcoef(entradas[:, COLUNA_CARBO], carbo)[0, 1] == pytest.approx(1.0)
+    assert (entradas[:, COLUNA_CAMINHADA] == 0).all()

@@ -1,3 +1,4 @@
+import argparse
 import math
 import time
 from dataclasses import dataclass
@@ -17,12 +18,11 @@ from sklearn.model_selection import (
     RandomizedSearchCV,
 )
 from sklearn.pipeline import make_pipeline
-from sklearn.preprocessing import FunctionTransformer, StandardScaler
+from sklearn.preprocessing import StandardScaler
 
 from glicose.esquema import DIAS_HABITO, DIAS_PLANO
 from glicose.refeicoes import ARTEFATOS
 from glicose.simulador import (
-    ALVOS,
     FRACAO_VALIDACAO,
     SEMENTE,
     ConfigRede,
@@ -33,10 +33,11 @@ from glicose.simulador import (
 Configuracao = dict[str, int | float]
 
 N_FOLDS_BUSCA = 3
-ALVO_REDE = "log1p"
 PARAMETRO_REDE = "regressor__sklearnregressor__model_kwargs"
 PREFIXO_FIT = "sklearnregressor__"
 BUSCAS = {"genetica": "AG", "aleatoria": "busca aleatória (RandomizedSearchCV)"}
+CORES_BUSCA = ("tab:blue", "tab:orange")
+N_SEMENTES_PADRAO = 1
 ARQUIVO_TREINOS = "hiper_treinos.parquet"
 ARQUIVO_POPULACOES = "hiper_populacoes.parquet"
 ARQUIVO_FIGURA = "hiper_comparacao.png"
@@ -83,7 +84,7 @@ class ConfigBusca:
     prob_gene_do_pai: float = 0.5
     taxa_mutacao: float = 0.25
     sigma_relativo: float = 0.2
-    processos: int = 6
+    processos: int = 4
     treino: ConfigRede = ConfigRede()
 
 
@@ -149,15 +150,15 @@ def construir_com_semente_fixa(X, y, **genes) -> keras.Model:
     keras.utils.set_random_seed(SEMENTE)
     # O predict do SKLearnRegressor não repassa verbose ao Keras.
     keras.config.disable_interactive_logging()
-    return construir_modelo(X.shape[1], **genes)
+    return construir_modelo(ConfigRede(**genes))
 
 
 def estimador() -> TransformedTargetRegressor:
-    alvo = ALVOS[ALVO_REDE]
     rede = keras.wrappers.SKLearnRegressor(model=construir_com_semente_fixa)
+    imputacao = SimpleImputer(strategy="median", keep_empty_features=True)
     return TransformedTargetRegressor(
-        regressor=make_pipeline(SimpleImputer(strategy="median"), StandardScaler(), rede),
-        transformer=make_pipeline(FunctionTransformer(alvo.ida, alvo.volta), StandardScaler()),
+        regressor=make_pipeline(imputacao, StandardScaler(), rede),
+        transformer=StandardScaler(),
     )
 
 
@@ -298,17 +299,24 @@ def rodar_buscas(dados: Dados, busca: ConfigBusca, semente: int) -> Resultado:
         [genetica.assign(busca="genetica"), aleatoria.assign(busca="aleatoria")],
         ignore_index=True,
     )
-    return Resultado(treinos, populacoes, {"genetica": meio - inicio, "aleatoria": fim - meio})
+    return Resultado(
+        treinos.assign(semente=semente),
+        populacoes.assign(semente=semente),
+        {"genetica": meio - inicio, "aleatoria": fim - meio},
+    )
 
 
 def por_configuracao(treinos: pd.DataFrame) -> pd.DataFrame:
-    return treinos.groupby(["busca", *GENES], sort=False, as_index=False).agg(
+    return treinos.groupby(["semente", "busca", *GENES], sort=False, as_index=False).agg(
         mae=("mae", "mean"), treinos=("mae", "size"), epocas_min=("epocas", "min")
     )
 
 
-def melhor_por_treinos(treinos: pd.DataFrame, busca: str) -> pd.Series:
-    configuracoes = por_configuracao(treinos[treinos["busca"] == busca])
+def da_busca(configuracoes: pd.DataFrame, busca: str, semente: int) -> pd.DataFrame:
+    return configuracoes[(configuracoes["busca"] == busca) & (configuracoes["semente"] == semente)]
+
+
+def melhor_por_treinos(configuracoes: pd.DataFrame) -> pd.Series:
     return pd.Series(
         configuracoes["mae"].cummin().to_numpy(), index=configuracoes["treinos"].cumsum()
     )
@@ -317,9 +325,14 @@ def melhor_por_treinos(treinos: pd.DataFrame, busca: str) -> pd.Series:
 def desenhar_comparacao(treinos: pd.DataFrame, mae_padrao: float, caminho: Path) -> None:
     figura = Figure(figsize=(7, 5))
     eixo = figura.subplots()
-    for busca, rotulo in BUSCAS.items():
-        curva = melhor_por_treinos(treinos, busca)
-        eixo.step(curva.index, curva.to_numpy(), where="post", label=rotulo)
+    configuracoes = por_configuracao(treinos)
+    sementes = configuracoes["semente"].unique()
+    for cor, (busca, rotulo) in zip(CORES_BUSCA, BUSCAS.items(), strict=True):
+        legenda = f"{rotulo}, {len(sementes)} sementes" if len(sementes) > 1 else rotulo
+        for i, semente in enumerate(sementes):
+            curva = melhor_por_treinos(da_busca(configuracoes, busca, semente))
+            rotulo_curva = legenda if i == 0 else None
+            eixo.step(curva.index, curva.to_numpy(), where="post", color=cor, label=rotulo_curva)
     eixo.axhline(mae_padrao, linestyle="--", color="gray", label="configuração padrão de P3")
     eixo.set_xlabel("treinos feitos")
     eixo.set_ylabel(f"melhor MAE em D7 a D9, GroupKFold({N_FOLDS_BUSCA}) (mg/dL·min)")
@@ -335,35 +348,50 @@ def config_padrao() -> Configuracao:
 
 
 def main() -> None:
+    argumentos = argparse.ArgumentParser(description="Compara o AG com o RandomizedSearchCV.")
+    argumentos.add_argument(
+        "--sementes",
+        type=int,
+        default=N_SEMENTES_PADRAO,
+        help="quantas sementes de busca rodar, a partir de SEMENTE",
+    )
+    sementes = range(SEMENTE, SEMENTE + argumentos.parse_args().sementes)
     refeicoes = pd.read_parquet(ARTEFATOS / "refeicoes.parquet")
     perfis = pd.read_parquet(ARTEFATOS / "perfis.parquet")
     dados = preparar_dados(refeicoes, perfis, SEMENTE)
     busca = ConfigBusca()
 
-    resultado = rodar_buscas(dados, busca, SEMENTE)
+    resultados = [rodar_buscas(dados, busca, semente) for semente in sementes]
+    treinos = pd.concat([r.treinos for r in resultados], ignore_index=True)
+    populacoes = pd.concat([r.populacoes for r in resultados], ignore_index=True)
     mae_padrao = treinar(dados, [config_padrao()], busca)["mae"].mean()
 
-    configuracoes = por_configuracao(resultado.treinos)
+    configuracoes = por_configuracao(treinos)
     print(f"GroupKFold({N_FOLDS_BUSCA}) por participante, MAE em D7 a D9 (mg/dL·min)")
-    for nome in BUSCAS:
-        da_busca = configuracoes[configuracoes["busca"] == nome]
-        melhor = da_busca.loc[da_busca["mae"].idxmin()]
-        genes = ", ".join(f"{gene}={melhor[gene]:.4g}" for gene in GENES)
-        print(
-            f"\n{BUSCAS[nome]}: {da_busca['treinos'].sum()} treinos, {len(da_busca)} configurações"
-        )
-        print(
-            f"  {resultado.segundos[nome]:.0f} s, menor número de épocas de um treino: "
-            f"{da_busca['epocas_min'].min()}"
-        )
-        print(f"  melhor: {genes}")
-        print(f"  MAE {melhor['mae']:.1f}")
+    print("cada treino é uma rede estruturada, não o conjunto de redes de P3")
+    for semente, resultado in zip(sementes, resultados, strict=True):
+        print(f"\nsemente {semente}")
+        for nome, rotulo in BUSCAS.items():
+            da_semente = da_busca(configuracoes, nome, semente)
+            melhor = da_semente.loc[da_semente["mae"].idxmin()]
+            genes = ", ".join(f"{gene}={melhor[gene]:.4g}" for gene in GENES)
+            print(
+                f"  {rotulo}: {da_semente['treinos'].sum()} treinos, "
+                f"{len(da_semente)} configurações, {resultado.segundos[nome]:.0f} s, "
+                f"menor número de épocas de um treino: {da_semente['epocas_min'].min()}"
+            )
+            print(f"    melhor: {genes}, MAE {melhor['mae']:.1f}")
+    if len(sementes) > 1:
+        melhores = configuracoes.groupby(["busca", "semente"])["mae"].min()
+        print(f"\nmelhor MAE das {len(sementes)} sementes, média e desvio")
+        for nome, rotulo in BUSCAS.items():
+            print(f"  {rotulo}: {melhores[nome].mean():.1f} ({melhores[nome].std():.1f})")
     print(f"\nconfiguração padrão de P3 ({config_padrao()}): MAE {mae_padrao:.1f}")
 
     ARTEFATOS.mkdir(exist_ok=True)
-    resultado.treinos.to_parquet(ARTEFATOS / ARQUIVO_TREINOS)
-    resultado.populacoes.to_parquet(ARTEFATOS / ARQUIVO_POPULACOES)
-    desenhar_comparacao(resultado.treinos, mae_padrao, ARTEFATOS / ARQUIVO_FIGURA)
+    treinos.to_parquet(ARTEFATOS / ARQUIVO_TREINOS)
+    populacoes.to_parquet(ARTEFATOS / ARQUIVO_POPULACOES)
+    desenhar_comparacao(treinos, mae_padrao, ARTEFATOS / ARQUIVO_FIGURA)
     print(f"gravado em {ARTEFATOS / ARQUIVO_FIGURA}")
 
 
