@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 from matplotlib.figure import Figure
 
-from glicose.esquema import GRUPOS, HORAS_DESDE_REFEICAO_ANTERIOR, MACROS, TIPOS_REFEICAO
+from glicose.esquema import GRUPOS, MACROS, TIPOS_REFEICAO
 from glicose.experimentos import (
     ARQUIVO_CURVAS,
     ARQUIVO_RESULTADOS,
@@ -22,7 +22,6 @@ CHAVE_PLANO = ["participante", "estrategia", "semente", "plano"]
 SEMENTE_EXIBIDA = 0
 TOLERANCIA_CAMINHADA_MIN = 1.0
 ACASO_MAIOR_CAMINHADA = 1 / len(TIPOS_REFEICAO)
-TOLERANCIA_LIMITE_HORAS = 1 / 60
 
 DPI = 120
 POLEGADAS_POR_PAINEL = 4.5
@@ -95,6 +94,12 @@ def tabela_por_grupo(resultados: pd.DataFrame) -> pd.DataFrame:
     return tabela.reindex(ordem).dropna(how="all")
 
 
+def parte_da_caminhada(tabela: pd.DataFrame) -> pd.Series:
+    ag = tabela.xs("ag", level="estrategia")
+    ganho = tabela.xs("habito", level="estrategia")["iauc_d9"] - ag["iauc_d9"]
+    return (ag["iauc_d9_sem_caminhada"] - ag["iauc_d9"]) / ganho
+
+
 def so_com_real(resultados: pd.DataFrame) -> pd.DataFrame:
     com_real = resultados.loc[resultados["estrategia"] == "real", "participante"].unique()
     return resultados[resultados["participante"].isin(com_real)]
@@ -146,24 +151,11 @@ def fracao_no_mais_carbo(coincidencias: pd.DataFrame) -> pd.Series:
 
 def mudanca_por_dia(resultados: pd.DataFrame) -> pd.DataFrame:
     chave = ["participante", "dia", "tipo"]
-    habito = resultados.loc[resultados["estrategia"] == "habito", [*chave, "prato", "horario"]]
+    habito = resultados.loc[resultados["estrategia"] == "habito", [*chave, "prato"]]
     ag = resultados[resultados["estrategia"] == "ag"]
     juntos = ag.merge(habito, on=chave, suffixes=("", "_habito"))
-    juntos = juntos.assign(
-        prato_trocado=juntos["prato"] != juntos["prato_habito"],
-        horas_mais_tarde=juntos["horario"] - juntos["horario_habito"],
-    )
-    colunas = ["prato_trocado", "horas_mais_tarde", "caminhada"]
-    return media_por_pessoa(juntos, colunas, ["dia"])
-
-
-def horario_no_limite(resultados: pd.DataFrame) -> pd.Series:
-    d9 = resultados[(resultados["estrategia"] == "ag") & (resultados["dia"] == DIA_ALVO)]
-    _, minimo, maximo = zip(*d9["tipo"].map(HORAS_DESDE_REFEICAO_ANTERIOR), strict=True)
-    no_limite = (d9["intervalo"] - np.array(minimo) < TOLERANCIA_LIMITE_HORAS) | (
-        np.array(maximo) - d9["intervalo"] < TOLERANCIA_LIMITE_HORAS
-    )
-    return no_limite.groupby(d9["tipo"]).mean().reindex(list(TIPOS_REFEICAO))
+    juntos = juntos.assign(prato_trocado=juntos["prato"] != juntos["prato_habito"])
+    return media_por_pessoa(juntos, ["prato_trocado", "caminhada"], ["dia"])
 
 
 def real_previsto_e_medido(resultados: pd.DataFrame) -> pd.Series:
@@ -396,7 +388,6 @@ def figura_mudanca(mudanca: pd.DataFrame) -> Figure:
     rotulos = [f"D{d}" for d in mudanca.index]
     paineis = (
         ("prato_trocado", "fração de pratos trocados", "Pratos diferentes do hábito"),
-        ("horas_mais_tarde", "horas (média com sinal)", "Quanto mais tarde que o hábito"),
         ("caminhada", "minutos (média)", "Caminhada (o hábito tem 0)"),
     )
     figura = Figure(
@@ -410,8 +401,8 @@ def figura_mudanca(mudanca: pd.DataFrame) -> Figure:
         eixo.set_title(titulo)
         eixo.set_xlabel("dia do plano")
     figura.suptitle(
-        "Plano do AG contra o hábito em cada dia. Em D7 e D8 só os pratos entram na aptidão,\n"
-        "então horário e caminhada desses dias ficam iguais aos do hábito"
+        "Plano do AG contra o hábito em cada dia. Os horários são os do hábito nos três dias,\n"
+        "e em D7 e D8 só os pratos entram na aptidão, então a caminhada fica a do hábito"
     )
     return figura
 
@@ -508,6 +499,8 @@ def imprimir(resultados: pd.DataFrame) -> None:
         print(tabela_por_grupo(resultados)[colunas_tabela].round(2).to_string())
         print("\nmesma tabela só com quem tem D9 real completo (a da figura)")
         print(tabela_por_grupo(so_com_real(resultados))[colunas_tabela].round(2).to_string())
+        print("\nparte do ganho do AG sobre o hábito que vem da caminhada, por grupo")
+        print(parte_da_caminhada(tabela_por_grupo(resultados)).round(2).to_string())
         print("\nAG contra busca aleatória com o mesmo número de avaliações (fração de vitórias)")
         for nome, valor in vitorias_ag(resultados).items():
             print(f"  {nome}: {valor:.1%}")
@@ -520,8 +513,6 @@ def imprimir(resultados: pd.DataFrame) -> None:
             f"{unicas} de {len(coincidencias)} planos com uma maior caminhada única"
         )
         print(fracao_no_mais_carbo(coincidencias).round(2).to_string())
-        print("\nfração das refeições de D9 do AG com o horário preso num extremo da busca")
-        print(horario_no_limite(resultados).round(2).to_string())
         print("\nD9 real: iAUC prevista com a glicose de jejum contra a medida, soma do dia")
         print(real_previsto_e_medido(resultados).round(2).to_string())
         print("\nplano do AG contra o hábito, por dia")
