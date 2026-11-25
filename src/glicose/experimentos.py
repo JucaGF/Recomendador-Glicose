@@ -26,8 +26,7 @@ from glicose.refeicoes import ARTEFATOS
 ARQUIVO_RESULTADOS = ARTEFATOS / "resultados.parquet"
 ARQUIVO_CURVAS = ARTEFATOS / "curvas.parquet"
 
-SEMENTES_VITRINE = 10
-SEMENTES_DEMAIS = 10
+SEMENTES = 10
 DIA_ALVO = DIAS_PLANO[-1]
 THREADS_POR_PROCESSO = 1
 
@@ -211,15 +210,16 @@ def curva(historico: pd.DataFrame, estrategia: str, semente: int, perfil) -> pd.
     )
 
 
-def rodar_deterministicas(perfil, tabelas: dict, simular) -> list[pd.DataFrame]:
+def rodar_deterministicas(
+    perfil, tabelas: dict, simular, config: ConfigAG = CONFIG
+) -> list[pd.DataFrame]:
+    cardapio = tabelas["cardapio"]
+    planos = {nome: montar(perfil, cardapio) for nome, montar in DETERMINISTICAS.items()}
+    planos["otimo"] = otimo_exato(perfil, cardapio, simular, config)
     partes = [
-        linhas_dos_planos(
-            montar(perfil, tabelas["cardapio"]), nome, None, perfil, simular, tabelas["cardapio"]
-        )
-        for nome, montar in DETERMINISTICAS.items()
+        linhas_dos_planos(plano, nome, None, perfil, simular, cardapio, config.lambdas)
+        for nome, plano in planos.items()
     ]
-    otimo = otimo_exato(perfil, tabelas["cardapio"], simular)
-    partes.append(linhas_dos_planos(otimo, "otimo", None, perfil, simular, tabelas["cardapio"]))
     real = comportamento_real(perfil, tabelas["refeicoes"], tabelas["dias"], simular)
     return partes if real is None else [real, *partes]
 
@@ -288,25 +288,24 @@ def rodar_tarefa(participante: int, semente: int | None, config: ConfigAG = CONF
         return sim.prever(perfil, refeicoes)
 
     if semente is None:
-        resultados, curvas = rodar_deterministicas(perfil, tabelas, simular), []
+        resultados, curvas = rodar_deterministicas(perfil, tabelas, simular, config), []
     else:
         resultados, curvas = rodar_semente(perfil, tabelas, simular, semente, config)
     tabela_curvas = conformar_com_ausentes(pd.concat(curvas), CURVAS) if curvas else None
     return conformar_com_ausentes(pd.concat(resultados), RESULTADOS), tabela_curvas
 
 
-def tarefas(grupos: pd.Series, sementes_demais: int) -> list[tuple[int, int | None]]:
-    destaque = vitrine(grupos)
-    lista = []
-    for participante in grupos.index:
-        n_sementes = SEMENTES_VITRINE if participante in destaque else sementes_demais
-        lista += [(participante, None), *((participante, s) for s in range(n_sementes))]
-    return lista
+def tarefas(grupos: pd.Series, sementes: int) -> list[tuple[int, int | None]]:
+    return [
+        (participante, semente)
+        for participante in grupos.index
+        for semente in (None, *range(sementes))
+    ]
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Compara as estratégias de D7 a D9.")
-    parser.add_argument("--sementes", type=int, default=SEMENTES_DEMAIS)
+    parser.add_argument("--sementes", type=int, default=SEMENTES)
     parser.add_argument("--processos", type=int, default=os.cpu_count())
     parser.add_argument("--participantes", type=int, nargs="*")
     args = parser.parse_args()

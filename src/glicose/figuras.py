@@ -22,7 +22,7 @@ PASTA_FIGURAS = ARTEFATOS / "figuras"
 CHAVE_PLANO = ["participante", "estrategia", "semente", "plano"]
 SEMENTE_EXIBIDA = 0
 # A rede calcula em float32, e o mesmo plano pode variar no último dígito entre lotes.
-TOLERANCIA_OTIMO = 1e-4
+TOLERANCIA_EMPATE = 1e-4
 OTIMIZADORES = ("menos_carbo_caminhada", "aleatoria", "ag", "nsga2_joelho", FRENTE)
 ESTRATEGIAS_MACROS = ("habito", "menos_carbo", "aleatoria", "ag")
 ESTRATEGIAS_PISO = ("real", "menos_carbo_caminhada", "aleatoria", "ag", "otimo")
@@ -103,13 +103,31 @@ def tabela_por_grupo(resultados: pd.DataFrame) -> pd.DataFrame:
     return tabela.reindex(ordem).dropna(how="all")
 
 
-def parte_da_caminhada(tabela: pd.DataFrame) -> pd.Series:
-    ag = tabela.xs("ag", level="estrategia")
-    habito = tabela.xs("habito", level="estrategia")
+def caminhada_depois_da_troca(resultados: pd.DataFrame) -> pd.DataFrame:
+    # O efeito da caminhada depende do prato e a previsão para no piso, então a parte mudaria
+    # se a conta trocasse primeiro a caminhada. Ela fica negativa para quem o prato do AG deixa
+    # sem margem para a caminhada baixar a iAUC.
+    todos = planos(resultados)
+    por_pessoa = (
+        todos[todos["estrategia"].isin(["ag", "habito"])]
+        .groupby(["grupo", "estrategia", "participante"])[["iauc_d9", "iauc_d9_sem_caminhada"]]
+        .mean()
+    )
+    ag = por_pessoa.xs("ag", level="estrategia")
+    habito = por_pessoa.xs("habito", level="estrategia")
     ganho = habito["iauc_d9"] - ag["iauc_d9"]
-    caminhada_do_ag = ag["iauc_d9_sem_caminhada"] - ag["iauc_d9"]
-    caminhada_do_habito = habito["iauc_d9_sem_caminhada"] - habito["iauc_d9"]
-    return (caminhada_do_ag - caminhada_do_habito) / ganho
+    a_mais = (ag["iauc_d9_sem_caminhada"] - ag["iauc_d9"]) - (
+        habito["iauc_d9_sem_caminhada"] - habito["iauc_d9"]
+    )
+    por_grupo = pd.DataFrame({"ganho": ganho, "a_mais": a_mais}).groupby("grupo")
+    tabela = pd.DataFrame(
+        {
+            "parte": por_grupo["a_mais"].mean() / por_grupo["ganho"].mean(),
+            "pessoas": por_grupo.size(),
+            "pessoas_com_parte_negativa": (a_mais < 0).groupby("grupo").sum(),
+        }
+    )
+    return tabela.reindex([g for g in GRUPOS if g in tabela.index])
 
 
 def so_com_real(resultados: pd.DataFrame) -> pd.DataFrame:
@@ -117,18 +135,30 @@ def so_com_real(resultados: pd.DataFrame) -> pd.DataFrame:
     return resultados[resultados["participante"].isin(com_real)]
 
 
-def vitorias_ag(resultados: pd.DataFrame) -> dict[str, float]:
+def placar(ag: pd.Series, aleatoria: pd.Series) -> pd.Series:
+    # No piso do simulador os dois chegam à mesma iAUC sem que nenhum tenha achado plano melhor.
+    empata = np.isclose(ag, aleatoria, rtol=TOLERANCIA_EMPATE, atol=0)
+    return pd.Series(
+        {
+            "vence": ((ag < aleatoria) & ~empata).mean(),
+            "empata": empata.mean(),
+            "perde": ((ag > aleatoria) & ~empata).mean(),
+        }
+    )
+
+
+def vitorias_ag(resultados: pd.DataFrame) -> pd.DataFrame:
     disputa = planos(resultados)
     disputa = disputa[disputa["estrategia"].isin(["ag", "aleatoria"])]
-    vitorias = {}
+    linhas = {}
     for coluna in ("aptidao", "iauc_d9", "iauc_d9_sem_caminhada"):
         por_semente = disputa.pivot_table(
             index=["participante", "semente"], columns="estrategia", values=coluna
         )
         por_pessoa = por_semente.groupby(level="participante").mean()
-        vitorias[f"{coluna}_por_execucao"] = (por_semente["ag"] < por_semente["aleatoria"]).mean()
-        vitorias[f"{coluna}_por_participante"] = (por_pessoa["ag"] < por_pessoa["aleatoria"]).mean()
-    return vitorias
+        linhas[(coluna, "por_execucao")] = placar(por_semente["ag"], por_semente["aleatoria"])
+        linhas[(coluna, "por_participante")] = placar(por_pessoa["ag"], por_pessoa["aleatoria"])
+    return pd.DataFrame(linhas).T.rename_axis(["metrica", "nivel"])
 
 
 def macros_d9(resultados: pd.DataFrame, estrategias=ESTRATEGIAS_MACROS) -> pd.DataFrame:
@@ -159,7 +189,7 @@ def distancia_do_otimo(resultados: pd.DataFrame) -> pd.DataFrame:
         melhor_de_cada_execucao["aptidao"] / melhor_de_cada_execucao["participante"].map(otimo) - 1
     )
     melhor_de_cada_execucao = melhor_de_cada_execucao.assign(
-        excesso=excesso, no_otimo=excesso <= TOLERANCIA_OTIMO
+        excesso=excesso, no_otimo=excesso <= TOLERANCIA_EMPATE
     )
     return (
         melhor_de_cada_execucao.groupby("estrategia")
@@ -315,8 +345,11 @@ def figura_ag_vs_aleatoria(resultados: pd.DataFrame, curvas: pd.DataFrame, desta
     valores = por_pessoa[["ag", "aleatoria"]]
     limites = [valores.min().min(), valores.max().max()]
     dispersao.plot(limites, limites, color=CINZA_REFERENCIA, linewidth=1, label="empate")
-    venceu = (por_pessoa["ag"] < por_pessoa["aleatoria"]).mean()
-    dispersao.set_title(f"iAUC prevista de D9 por participante. O AG vence em {venceu:.0%}")
+    resultado = placar(por_pessoa["ag"], por_pessoa["aleatoria"])
+    dispersao.set_title(
+        f"iAUC prevista de D9 por participante. O AG vence em {resultado['vence']:.0%},\n"
+        f"empata em {resultado['empata']:.0%} e perde em {resultado['perde']:.0%}"
+    )
     dispersao.set_xlabel("busca aleatória, mesmo número de avaliações (mg/dL·min)")
     dispersao.set_ylabel("AG (mg/dL·min)")
     dispersao.legend()
@@ -530,11 +563,15 @@ def imprimir(resultados: pd.DataFrame) -> None:
         print(tabela_por_grupo(resultados)[colunas_tabela].round(2).to_string())
         print("\nmesma tabela só com quem tem D9 real completo")
         print(tabela_por_grupo(so_com_real(resultados))[colunas_tabela].round(2).to_string())
-        print("\nparte do ganho do AG sobre o hábito que vem da caminhada, por grupo")
-        print(parte_da_caminhada(tabela_por_grupo(resultados)).round(2).to_string())
-        print("\nAG contra busca aleatória com o mesmo número de avaliações (fração de vitórias)")
-        for nome, valor in vitorias_ag(resultados).items():
-            print(f"  {nome}: {valor:.1%}")
+        print(
+            "\nparte do ganho do AG sobre o hábito que a caminhada a mais soma depois da troca de"
+            "\npratos, por grupo. Trocando primeiro a caminhada a parte seria outra, e ela fica"
+            "\nnegativa para quem o prato do AG deixa sem margem para a caminhada baixar"
+        )
+        print(caminhada_depois_da_troca(resultados).round(2).to_string())
+        print("\nAG contra busca aleatória com o mesmo número de avaliações (fração das execuções")
+        print("e das pessoas em que o AG vence, empata ou perde)")
+        print(vitorias_ag(resultados).round(3).to_string())
         print("\naptidão de cada execução acima do ótimo exato (fração) e execuções no ótimo")
         print(distancia_do_otimo(resultados).round(3).to_string())
         print("\nmacros de D9 em gramas por estratégia")

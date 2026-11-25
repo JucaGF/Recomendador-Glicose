@@ -151,20 +151,52 @@ def test_tabela_e_vitorias_fazem_a_media_das_sementes_antes_das_pessoas():
 
     assert tabela.loc[("dm2", "ag"), "iauc_d9"] == 300.0
     assert tabela.loc[("dm2", "ag"), "participantes"] == 2
-    assert vitorias["aptidao_por_execucao"] == pytest.approx(2 / 3)
-    assert vitorias["aptidao_por_participante"] == 0.5
+    assert vitorias.loc[("aptidao", "por_execucao"), "vence"] == pytest.approx(2 / 3)
+    assert vitorias.loc[("aptidao", "por_participante"), "vence"] == 0.5
 
 
-def test_parte_da_caminhada_conta_so_a_caminhada_que_o_habito_ainda_nao_fazia():
-    ag_caminhando = linha_feita_a_mao(1, "ag", 0, 600.0, 1.0) | {"iauc_d9_sem_caminhada": 900.0}
-    habito_caminhando = linha_feita_a_mao(1, "habito", None, 1000.0, 1.0) | {
-        "iauc_d9_sem_caminhada": 1100.0
-    }
-    resultados = pd.DataFrame([habito_caminhando, ag_caminhando])
+def test_empate_no_piso_nao_conta_como_derrota_do_ag():
+    resultados = pd.DataFrame(
+        [
+            linha_feita_a_mao(1, "ag", 0, 0.0, 1.0),
+            linha_feita_a_mao(1, "aleatoria", 0, 0.0, 2.0),
+            linha_feita_a_mao(1, "ag", 1, 100.0, 1.0),
+            linha_feita_a_mao(1, "aleatoria", 1, 200.0, 2.0),
+            linha_feita_a_mao(2, "ag", 0, 300.0, 1.0),
+            linha_feita_a_mao(2, "aleatoria", 0, 200.0, 2.0),
+        ]
+    )
 
-    parte = figuras.parte_da_caminhada(figuras.tabela_por_grupo(resultados))
+    placar = figuras.vitorias_ag(resultados).loc[("iauc_d9", "por_execucao")]
 
-    assert parte["dm2"] == pytest.approx((300.0 - 100.0) / 400.0)
+    assert placar.to_dict() == pytest.approx({"vence": 1 / 3, "empata": 1 / 3, "perde": 1 / 3})
+
+
+def test_caminhada_depois_da_troca_desconta_a_do_habito_e_mostra_quem_fica_negativo():
+    resultados = pd.DataFrame(
+        [
+            linha_feita_a_mao(1, "habito", None, 1000.0, 1.0) | {"iauc_d9_sem_caminhada": 1100.0},
+            linha_feita_a_mao(1, "ag", 0, 600.0, 1.0) | {"iauc_d9_sem_caminhada": 900.0},
+            linha_feita_a_mao(2, "habito", None, 1000.0, 1.0) | {"iauc_d9_sem_caminhada": 1250.0},
+            linha_feita_a_mao(2, "ag", 0, 600.0, 1.0) | {"iauc_d9_sem_caminhada": 700.0},
+        ]
+    )
+
+    parte = figuras.caminhada_depois_da_troca(resultados).loc["dm2"]
+
+    assert parte["parte"] == pytest.approx(((300.0 - 100.0) + (100.0 - 250.0)) / (400.0 + 400.0))
+    assert parte["pessoas"] == 2
+    assert parte["pessoas_com_parte_negativa"] == 1
+
+
+def test_vitrine_roda_as_mesmas_sementes_que_os_demais():
+    grupos = pd.Series({1: "dm2", 2: "dm2", 3: "saudavel"}, name="grupo").rename_axis(
+        "participante"
+    )
+
+    lista = experimentos.tarefas(grupos, SEMENTES_PEQUENAS)
+
+    assert lista == [(p, s) for p in (1, 2, 3) for s in (None, 0, 1)]
 
 
 def test_d9_real_entra_com_a_glicose_de_jejum_e_so_quando_esta_completo(sinteticos):
@@ -244,11 +276,14 @@ def test_distancia_do_otimo_compara_cada_execucao_com_o_otimo_da_pessoa():
     assert distancia["execucoes_no_otimo"] == pytest.approx(1 / 3)
 
 
+@pytest.fixture(scope="module")
 def resultados_pequenos(sinteticos) -> tuple[pd.DataFrame, pd.DataFrame]:
     tabelas = {nome: sinteticos[nome] for nome in ("cardapio", "refeicoes", "dias")}
     partes, curvas = [], []
     for _, perfil in sinteticos["perfis"].iterrows():
-        partes += experimentos.rodar_deterministicas(perfil, tabelas, ag.simulador_falso)
+        partes += experimentos.rodar_deterministicas(
+            perfil, tabelas, ag.simulador_falso, CONFIG_PEQUENA_COM_OUTROS_PESOS
+        )
         for semente in range(SEMENTES_PEQUENAS):
             resultados, historicos = experimentos.rodar_semente(
                 perfil, tabelas, ag.simulador_falso, semente, CONFIG_PEQUENA_COM_OUTROS_PESOS
@@ -261,8 +296,22 @@ def resultados_pequenos(sinteticos) -> tuple[pd.DataFrame, pd.DataFrame]:
     )
 
 
-def test_figuras_saem_de_uma_tabela_pequena_sem_rodar_o_ag(sinteticos, tmp_path, monkeypatch):
-    resultados, curvas = resultados_pequenos(sinteticos)
+def test_nenhum_plano_fica_abaixo_do_otimo_medido_com_os_mesmos_pesos(resultados_pequenos):
+    resultados, _ = resultados_pequenos
+    todos = figuras.planos(resultados).dropna(subset=["aptidao"])
+    otimo = todos[todos["estrategia"] == "otimo"].set_index("participante")["aptidao"]
+
+    do_otimo = todos["participante"].map(otimo)
+    piso = do_otimo - TOLERANCIA_FLOAT32 * do_otimo.abs()
+
+    assert len(otimo) == N_PARTICIPANTES
+    assert (todos["aptidao"] >= piso).all()
+
+
+def test_figuras_saem_de_uma_tabela_pequena_sem_rodar_o_ag(
+    resultados_pequenos, tmp_path, monkeypatch
+):
+    resultados, curvas = resultados_pequenos
 
     def ag_proibido(*args, **kwargs):
         raise AssertionError("figuras.py não pode rodar o AG")
