@@ -339,11 +339,11 @@ def refeicoes_da_grade() -> pd.DataFrame:
 
 
 def versao_das_refeicoes(versao: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Só o alvo muda entre as versões, e com ele a sensibilidade ao carbo do perfil, que é a
+    inclinação desse alvo em D1 a D6. A glicose pré-refeição fica a nativa nas duas."""
     refeicoes = refeicoes_da_grade().assign(iauc_nativa=lambda t: t["iauc_dexcom"])
     if versao == "grade":
-        refeicoes = refeicoes.assign(
-            iauc_dexcom=refeicoes["iauc_grade"], glicose_pre=refeicoes["glicose_pre_grade"]
-        )
+        refeicoes = refeicoes.assign(iauc_dexcom=refeicoes["iauc_grade"])
     bio = pd.read_csv(pasta_dados() / "CGMacros" / "bio.csv")
     return refeicoes, montar_perfis(refeicoes, dados()["dias"], bio)
 
@@ -352,6 +352,8 @@ def rodar_fold(versao: str, fold: int) -> Saida:
     inicio = time.process_time()
     refeicoes, perfis = versao_das_refeicoes(versao)
     treino, teste = list(simulador.dividir(refeicoes, perfis))[fold]
+    # Como em P3: o perfil de quem fica de fora vem de D1 a D6, e o erro conta só D7 a D9.
+    teste = teste.recortar(teste.refeicoes["dia"].isin(DIAS_PLANO).to_numpy())
     sim, _ = simulador.treinar(treino, simulador.ConfigRede(), SEMENTE)
     previsto = teste.refeicoes.assign(
         versao=versao, fold=fold, previsto=sim.prever_atributos(teste.atributos)
@@ -437,7 +439,8 @@ def analisar_sem_travas(planos_d9: pd.DataFrame, treino: pd.DataFrame) -> str:
         f"{por_plano['com_travas'].median():.0f} do ótimo com travas (mg/dL·min, {len(por_plano)} "
         f"planos); "
         f"{livres['fora'].mean():.0%} das refeições sem travas têm macro fora da faixa do treino "
-        f"(com travas {com['fora'].mean():.0%}); distância mediana ao treino "
+        f"(com travas {com['fora'].mean():.0%}) e {(livres['fibra'] > livres['carbo']).mean():.0%} "
+        f"têm mais fibra que carbo, o que o treino nunca tem; distância mediana ao treino "
         f"{livres['distancia'].median():.2f} contra {com['distancia'].median():.2f} desvios-padrão"
     )
 
@@ -669,7 +672,7 @@ def analisar_interpolacao(previsoes: pd.DataFrame) -> str:
             capsize=6,
         )
     barras.set_xticks([0, 1], [f"treinado com\n{r}" for r in rotulos.values()])
-    barras.set_ylabel("MAE contra a iAUC nativa (mg/dL·min)")
+    barras.set_ylabel("MAE de D7 a D9 contra a iAUC nativa (mg/dL·min)")
     barras.set_title("Erro do simulador (barra: desvio entre os 5 folds)")
     dispersao.scatter(refeicoes["iauc_dexcom"], refeicoes["iauc_grade"], s=6, alpha=0.4)
     limite = max(refeicoes["iauc_dexcom"].max(), refeicoes["iauc_grade"].max())
@@ -692,10 +695,11 @@ def analisar_interpolacao(previsoes: pd.DataFrame) -> str:
     gravar(fig, "interpolacao_glicose_pre.png")
 
     return (
-        f"interpolação: MAE contra a iAUC nativa {contra_nativa['nativa'].mean():.0f} ± "
+        f"interpolação: MAE de D7 a D9 contra a iAUC nativa {contra_nativa['nativa'].mean():.0f} ± "
         f"{contra_nativa['nativa'].std():.0f} treinando com o alvo nativo e "
         f"{contra_nativa['grade'].mean():.0f} ± {contra_nativa['grade'].std():.0f} com o da grade "
-        f"(contra o próprio alvo {contra_propria['grade'].mean():.0f}); Pearson das iAUC "
+        f"(contra o próprio alvo {contra_propria['grade'].mean():.0f}) em "
+        f"{len(previsoes) // len(VERSOES)} refeições; Pearson das iAUC de D1 a D9 "
         f"{pearson:.4f} em {len(refeicoes)} refeições; glicose pré da grade menos a nativa "
         f"mediana {mediana:.1f} e percentil 90 {p90:.1f} mg/dL"
     )
