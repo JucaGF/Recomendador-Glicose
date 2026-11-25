@@ -29,18 +29,6 @@ SEMENTE_DADOS = 0
 PASTA_ARTEFATOS = Path("artefatos")
 
 
-# populacao_inicial e sigma, de ag.py, leem só estes campos da configuração. Por isso os nomes
-# repetem os de ConfigAG, sem os campos que o NSGA-II não usa.
-@dataclass(frozen=True)
-class ConfigNSGA:
-    tamanho_populacao: int = ConfigAG.tamanho_populacao
-    max_geracoes: int = ConfigAG.max_geracoes
-    taxa_mutacao_prato: float = ConfigAG.taxa_mutacao_prato
-    taxa_mutacao_gaussiana: float = ConfigAG.taxa_mutacao_gaussiana
-    sigma_relativo_inicial: float = ConfigAG.sigma_relativo_inicial
-    sigma_relativo_final: float = ConfigAG.sigma_relativo_final
-
-
 @dataclass
 class ResultadoNSGA:
     frente: Populacao
@@ -59,10 +47,14 @@ def calcular_violacao(pop: Populacao, perfil, cardapio) -> np.ndarray:
     return penalidade_kcal(pop, perfil, cardapio) + penalidade_proteina(pop, perfil, cardapio)
 
 
+def domina(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """a domina b quando não é pior em nenhum objetivo e é melhor em pelo menos um."""
+    return (a <= b).all(axis=-1) & (a < b).any(axis=-1)
+
+
 # Dominância com restrições do artigo de Deb et al. (2002).
 def matriz_dominancia(objetivos: np.ndarray, violacao: np.ndarray) -> np.ndarray:
-    a, b = objetivos[:, None, :], objetivos[None, :, :]
-    pareto = (a <= b).all(axis=2) & (a < b).any(axis=2)
+    pareto = domina(objetivos[:, None, :], objetivos[None, :, :])
     viavel = violacao == 0
     viavel_a, viavel_b = viavel[:, None], viavel[None, :]
     viola_menos = violacao[:, None] < violacao[None, :]
@@ -116,6 +108,12 @@ def classificar(objetivos: np.ndarray, violacao: np.ndarray) -> tuple[np.ndarray
     return posto, aglomeracao
 
 
+def sobreviventes(posto: np.ndarray, aglomeracao: np.ndarray, n: int) -> np.ndarray:
+    """Os n melhores: primeiro a frente de menor posto, e dentro dela os mais isolados."""
+    ordem = sorted(range(len(posto)), key=lambda i: (posto[i], -aglomeracao[i]))
+    return np.array(ordem[:n])
+
+
 def torneio_binario(posto: np.ndarray, aglomeracao: np.ndarray, rng) -> int:
     i, j = rng.choice(len(posto), 2, replace=False)
     if posto[i] != posto[j]:
@@ -130,7 +128,16 @@ def primeira_frente_sem_repeticao(pop: Populacao, objetivos, posto) -> tuple[Pop
     return pop[frente], objetivos[frente]
 
 
-def rodar(config: ConfigNSGA, simular: Simulador, perfil, cardapio, semente: int) -> ResultadoNSGA:
+def rodar(config: ConfigAG, simular: Simulador, perfil, cardapio, semente: int) -> ResultadoNSGA:
+    """Usa de ConfigAG o tamanho da população, o número de gerações e as taxas de mutação.
+    Ignora paciência, tamanho do torneio, elitismo e lambdas, porque o torneio é binário, a
+    sobrevivência já guarda os melhores, kcal e proteína são restrições e o hábito é o segundo
+    objetivo.
+
+    Sem paciência, roda sempre todas as gerações e gasta (max_geracoes + 1) x tamanho_populacao
+    avaliações. Se nenhum plano avaliado cabe nas restrições, a frente devolvida é a dos que
+    menos violam.
+    """
     rng = np.random.default_rng(semente)
     vizinhos = vizinhos_prato(cardapio)
     pop = populacao_inicial(config, perfil, cardapio, vizinhos, rng)
@@ -154,11 +161,11 @@ def rodar(config: ConfigNSGA, simular: Simulador, perfil, cardapio, semente: int
         objetivos = np.vstack([objetivos, calcular_objetivos(filhos, simular, perfil, cardapio)])
         violacao = np.concatenate([violacao, calcular_violacao(filhos, perfil, cardapio)])
         posto, aglomeracao = classificar(objetivos, violacao)
-        sobreviventes = np.lexsort((-aglomeracao, posto))[: config.tamanho_populacao]
+        ficam = sobreviventes(posto, aglomeracao, config.tamanho_populacao)
 
-        pop = juntos[sobreviventes]
-        objetivos, violacao = objetivos[sobreviventes], violacao[sobreviventes]
-        posto, aglomeracao = posto[sobreviventes], aglomeracao[sobreviventes]
+        pop = juntos[ficam]
+        objetivos, violacao = objetivos[ficam], violacao[ficam]
+        posto, aglomeracao = posto[ficam], aglomeracao[ficam]
         frentes_por_geracao.append(objetivos[posto == 0])
 
     frente, objetivos_frente = primeira_frente_sem_repeticao(pop, objetivos, posto)
@@ -197,7 +204,7 @@ def main() -> None:
     cardapio = dados["cardapio"]
     frentes = {}
     for _, perfil in dados["perfis"].iterrows():
-        resultado = rodar(ConfigNSGA(), simulador_falso, perfil, cardapio, args.semente)
+        resultado = rodar(ConfigAG(), simulador_falso, perfil, cardapio, args.semente)
         violacoes = calcular_violacao(resultado.frente, perfil, cardapio) > 0
         ponto_habito = calcular_objetivos(
             habito(perfil, cardapio), simulador_falso, perfil, cardapio

@@ -118,7 +118,7 @@ def test_frente_do_nsga2_igual_a_da_forca_bruta():
     assert len(esperada) > 1
 
     for semente in range(3):
-        resultado = nsga2.rodar(nsga2.ConfigNSGA(), ag.simulador_falso, perfil, cardapio, semente)
+        resultado = nsga2.rodar(ag.ConfigAG(), ag.simulador_falso, perfil, cardapio, semente)
         assert resultado.objetivos == pytest.approx(esperada), semente
 
 
