@@ -1,7 +1,10 @@
+import itertools
+
+import numpy as np
 import pandas as pd
 import pytest
 
-from glicose import ag, otimizadores, plano
+from glicose import ag, nsga2, otimizadores, plano
 from glicose.esquema import CARDAPIO, MACROS, TIPOS_REFEICAO, conformar, dados_sinteticos
 
 
@@ -40,6 +43,83 @@ def prato(carbo, proteina, gordura, fibra=0.0) -> dict:
         "fibra": fibra,
         "kcal": 4 * carbo + 4 * proteina + 9 * gordura,
     }
+
+
+PRATOS_PEQUENOS = {
+    "cafe": [prato(20, 10, 5, 2), prato(45, 20, 10, 3), prato(70, 25, 15, 4)],
+    "almoco": [prato(25, 15, 10, 4), prato(60, 30, 20, 6), prato(90, 40, 25, 8)],
+    "jantar": [prato(20, 20, 10, 3), prato(55, 30, 20, 5), prato(85, 35, 30, 6)],
+}
+
+
+def perfil_pequeno() -> pd.Series:
+    habito = {tipo: {m: PRATOS_PEQUENOS[tipo][2][m] for m in MACROS} for tipo in TIPOS_REFEICAO}
+    return montar_perfil(kcal_dia=1400.0, proteina_dia=60.0, habito_por_tipo=habito)
+
+
+# Pontos 0 a 5 em (f1, f2), os dois a minimizar.
+# Frente 1: (1, 5), (2, 3), (4, 1). Nenhum é melhor nos dois.
+# Frente 2: (3, 4) é dominado só por (2, 3), e (5, 2) só por (4, 1).
+# Frente 3: (5, 5) é dominado por todos.
+SEIS_PONTOS = np.array([[3, 4], [1, 5], [5, 5], [4, 1], [5, 2], [2, 3]], dtype=float)
+FRENTES_SEIS_PONTOS = [{1, 3, 5}, {0, 4}, {2}]
+
+
+def test_ordenar_nao_dominados_reproduz_as_frentes_calculadas_a_mao():
+    frentes = nsga2.ordenar_nao_dominados(SEIS_PONTOS)
+
+    assert [set(frente.tolist()) for frente in frentes] == FRENTES_SEIS_PONTOS
+
+
+def test_distancia_aglomeracao_da_primeira_frente_calculada_a_mao():
+    frente = SEIS_PONTOS[[1, 5, 3]]
+
+    distancia = nsga2.distancia_aglomeracao(frente)
+
+    # O ponto do meio, (2, 3), tem vizinhos (1, 5) e (4, 1). Em f1 a amplitude é 3 e o vão é 3.
+    # Em f2 a amplitude é 4 e o vão é 4. A soma dá 1 + 1 = 2. As pontas ficam infinitas.
+    assert distancia.tolist() == [np.inf, 2.0, np.inf]
+
+
+def test_plano_viavel_vem_antes_de_qualquer_inviavel():
+    objetivos = np.array([[5.0, 5.0], [0.0, 0.0], [0.0, 0.0]])
+    violacao = np.array([0.0, 0.5, 0.2])
+
+    frentes = nsga2.ordenar_nao_dominados(objetivos, violacao)
+
+    assert [frente.tolist() for frente in frentes] == [[0], [2], [1]]
+
+
+# O simulador falso ignora o horário e premia a caminhada, então a força bruta enumera os 3^9
+# planos de pratos com a caminhada no máximo. penalidade_kcal e penalidade_proteina valem
+# também em D7 e D8, por isso só D9 livre não basta.
+def frente_forca_bruta(perfil, cardapio) -> np.ndarray:
+    combinacoes = np.array(list(itertools.product(range(3), repeat=plano.N_REFEICOES)))
+    minimos, _ = plano.limites_intervalo()
+    todos = plano.Populacao(
+        combinacoes,
+        np.tile(minimos, (len(combinacoes), 1)),
+        np.full(combinacoes.shape, plano.LIMITES_CAMINHADA[1]),
+    )
+    objetivos = nsga2.calcular_objetivos(todos, ag.simulador_falso, perfil, cardapio)
+    viaveis = objetivos[nsga2.calcular_violacao(todos, perfil, cardapio) == 0]
+    ordenados = viaveis[np.lexsort((viaveis[:, 1], viaveis[:, 0]))]
+    frente, menor_distancia = [], np.inf
+    for iauc, distancia in ordenados:
+        if distancia < menor_distancia:
+            frente.append((iauc, distancia))
+            menor_distancia = distancia
+    return np.array(frente)
+
+
+def test_frente_do_nsga2_igual_a_da_forca_bruta():
+    cardapio, perfil = montar_cardapio(PRATOS_PEQUENOS), perfil_pequeno()
+    esperada = frente_forca_bruta(perfil, cardapio)
+    assert len(esperada) > 1
+
+    for semente in range(3):
+        resultado = nsga2.rodar(nsga2.ConfigNSGA(), ag.simulador_falso, perfil, cardapio, semente)
+        assert resultado.objetivos == pytest.approx(esperada), semente
 
 
 def test_busca_aleatoria_usa_exatamente_o_orcamento_do_ag():
