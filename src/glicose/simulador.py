@@ -85,7 +85,7 @@ def montar_atributos(refeicoes: pd.DataFrame, perfis: pd.DataFrame) -> pd.DataFr
     ).astype("float64")
 
 
-def construir_modelo(config: ConfigRede, nome: str = "rede") -> keras.Model:
+def construir_modelo(config: ConfigRede) -> keras.Model:
     entrada = keras.Input(shape=(len(ATRIBUTOS),))
     contexto = keras.ops.take(entrada, COLUNAS_CONTEXTO, axis=1)
     carbo = keras.ops.take(entrada, [COLUNA_CARBO], axis=1)
@@ -99,7 +99,7 @@ def construir_modelo(config: ConfigRede, nome: str = "rede") -> keras.Model:
     sensibilidade = keras.layers.Dense(1, activation="softplus")(oculta)
     beneficio_caminhada = keras.layers.Dense(1, activation="softplus")(oculta)
     saida = base + sensibilidade * carbo - beneficio_caminhada * caminhada
-    modelo = keras.Model(entrada, saida, name=nome)
+    modelo = keras.Model(entrada, saida)
     modelo.compile(loss="mae", optimizer=keras.optimizers.SGD(config.taxa_aprendizado))
     return modelo
 
@@ -158,7 +158,7 @@ def treinar(treino: Particao, config: ConfigRede, semente: int) -> tuple[Simulad
     redes, melhores_epocas = [], []
     for semente_rede in sementes_das_redes(config, semente):
         keras.utils.set_random_seed(semente_rede)
-        rede = construir_modelo(config, nome=f"rede_{semente_rede}")
+        rede = construir_modelo(config)
         ajuste, validacao = separar_validacao(treino, semente_rede)
         historico = rede.fit(
             x[ajuste],
@@ -240,7 +240,7 @@ def treinar_final(
     redes = []
     for semente_rede in sementes_das_redes(config, semente):
         keras.utils.set_random_seed(semente_rede)
-        rede = construir_modelo(config, nome=f"rede_{semente_rede}")
+        rede = construir_modelo(config)
         rede.fit(x, y, epochs=config.epocas, batch_size=config.tamanho_lote, verbose=0)
         redes.append(rede)
     return Simulador(media_das_redes(redes), preparo, escala_alvo, float(habito.iauc.max()))
