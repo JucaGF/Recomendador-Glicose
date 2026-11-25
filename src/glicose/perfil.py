@@ -28,6 +28,7 @@ def montar_perfis(refeicoes: pd.DataFrame, dias: pd.DataFrame, bio: pd.DataFrame
     habito = refeicoes[refeicoes["dia"].isin(DIAS_HABITO)]
     dias_habito = dias[dias["dia"].isin(DIAS_HABITO)]
 
+    # O cabeçalho do bio.csv traz "Insulin " com um espaço no fim.
     bio = bio.rename(columns=str.strip).rename(columns=COLUNAS_BIO)[list(COLUNAS_BIO.values())]
     grupo = refeicoes.groupby("participante")["grupo"].first()
     resumo_dias = dias_habito.groupby("participante").agg(
