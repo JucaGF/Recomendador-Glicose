@@ -105,8 +105,11 @@ def tabela_por_grupo(resultados: pd.DataFrame) -> pd.DataFrame:
 
 def parte_da_caminhada(tabela: pd.DataFrame) -> pd.Series:
     ag = tabela.xs("ag", level="estrategia")
-    ganho = tabela.xs("habito", level="estrategia")["iauc_d9"] - ag["iauc_d9"]
-    return (ag["iauc_d9_sem_caminhada"] - ag["iauc_d9"]) / ganho
+    habito = tabela.xs("habito", level="estrategia")
+    ganho = habito["iauc_d9"] - ag["iauc_d9"]
+    caminhada_do_ag = ag["iauc_d9_sem_caminhada"] - ag["iauc_d9"]
+    caminhada_do_habito = habito["iauc_d9_sem_caminhada"] - habito["iauc_d9"]
+    return (caminhada_do_ag - caminhada_do_habito) / ganho
 
 
 def so_com_real(resultados: pd.DataFrame) -> pd.DataFrame:

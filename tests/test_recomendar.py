@@ -155,13 +155,16 @@ def test_tabela_e_vitorias_fazem_a_media_das_sementes_antes_das_pessoas():
     assert vitorias["aptidao_por_participante"] == 0.5
 
 
-def test_parte_da_caminhada_divide_o_ganho_sem_caminhada_pelo_ganho_total():
+def test_parte_da_caminhada_conta_so_a_caminhada_que_o_habito_ainda_nao_fazia():
     ag_caminhando = linha_feita_a_mao(1, "ag", 0, 600.0, 1.0) | {"iauc_d9_sem_caminhada": 900.0}
-    resultados = pd.DataFrame([linha_feita_a_mao(1, "habito", None, 1000.0, 1.0), ag_caminhando])
+    habito_caminhando = linha_feita_a_mao(1, "habito", None, 1000.0, 1.0) | {
+        "iauc_d9_sem_caminhada": 1100.0
+    }
+    resultados = pd.DataFrame([habito_caminhando, ag_caminhando])
 
     parte = figuras.parte_da_caminhada(figuras.tabela_por_grupo(resultados))
 
-    assert parte["dm2"] == pytest.approx(0.75)
+    assert parte["dm2"] == pytest.approx((300.0 - 100.0) / 400.0)
 
 
 def test_d9_real_entra_com_a_glicose_de_jejum_e_so_quando_esta_completo(sinteticos):
