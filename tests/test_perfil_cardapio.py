@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from glicose.cardapio import montar_cardapio
 from glicose.esquema import DIAS_HABITO, DIAS_PLANO, dados_sinteticos
 from glicose.perfil import montar_perfis
 
@@ -108,3 +109,35 @@ def test_menos_de_3_refeicoes_nao_dao_sensibilidade():
     assert np.isnan(sensibilidade[1])
     assert sensibilidade[[2, 3]].notna().all()
 
+
+def test_jantar_zerado_fica_fora_do_cardapio():
+    refeicoes = pd.DataFrame(
+        [
+            refeicao(tipo="jantar", carbo=0.0, proteina=0.0, gordura=0.0, fibra=0.0, kcal=0.0),
+            refeicao(tipo="jantar", carbo=30.0),
+        ]
+    )
+
+    cardapio = montar_cardapio(refeicoes)
+
+    assert cardapio["carbo"].tolist() == [30.0]
+
+
+def test_prato_repetido_vira_um_prato_com_foto():
+    refeicoes = pd.DataFrame(
+        [
+            refeicao(participante=2, tipo="jantar", foto=None),
+            refeicao(participante=3, tipo="jantar", foto="CGMacros/CGMacros-003/photos/b.jpg"),
+            refeicao(participante=4, tipo="jantar", foto="CGMacros/CGMacros-004/photos/c.jpg"),
+            refeicao(participante=5, tipo="jantar", carbo=10.0, foto=None),
+            refeicao(participante=1, tipo="cafe", carbo=70.0),
+        ]
+    )
+
+    cardapio = montar_cardapio(refeicoes)
+
+    assert cardapio["tipo"].tolist() == ["cafe", "jantar"]
+    assert cardapio["prato"].tolist() == [0, 1]
+    jantar = cardapio.iloc[1]
+    assert jantar["foto"] == "CGMacros/CGMacros-003/photos/b.jpg"
+    assert jantar["participante_origem"] == 3
