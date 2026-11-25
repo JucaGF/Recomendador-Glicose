@@ -34,6 +34,7 @@ def refeicao(**colunas) -> dict:
         "grupo": "saudavel",
         "foto": "CGMacros/CGMacros-001/photos/a.jpg",
         "iauc_dexcom": 2000.0,
+        "minutos_ativos_60": 10.0,
         **colunas,
     }
     kcal_dos_macros = 4 * linha["carbo"] + 4 * linha["proteina"] + 9 * linha["gordura"]
@@ -68,7 +69,7 @@ def test_mudar_os_dias_do_plano_nao_muda_o_perfil():
 
     futuro_refeicoes = refeicoes["dia"].isin(DIAS_PLANO)
     refeicoes = refeicoes.copy()
-    refeicoes.loc[futuro_refeicoes, ["carbo", "proteina", "horario"]] *= 3
+    refeicoes.loc[futuro_refeicoes, ["carbo", "proteina", "horario", "minutos_ativos_60"]] *= 3
     refeicoes.loc[futuro_refeicoes, "iauc_dexcom"] = 99_999.0
     futuro_dias = dias["dia"].isin(DIAS_PLANO)
     dias = dias.copy()
@@ -116,6 +117,54 @@ def test_sensibilidade_e_a_constante_quando_a_iauc_e_proporcional_ao_carbo():
 
     assert perfil["sensibilidade_carbo"] == pytest.approx(inclinacao)
     assert perfil["glicose_media"] == pytest.approx(115.0)
+
+
+def test_caminhada_habitual_e_a_media_dos_dias_1_a_6():
+    refeicoes = pd.DataFrame(
+        [
+            refeicao(dia=1, carbo=20.0, minutos_ativos_60=10.0),
+            refeicao(dia=2, carbo=45.0, minutos_ativos_60=20.0),
+            refeicao(dia=3, carbo=90.0, minutos_ativos_60=np.nan),
+            refeicao(dia=7, carbo=60.0, minutos_ativos_60=60.0),
+        ]
+    )
+
+    perfil = perfis_das_refeicoes(refeicoes).loc[1]
+
+    assert perfil["caminhada_almoco"] == pytest.approx(15.0)
+
+
+def test_sem_caminhada_medida_recebe_a_mediana_do_grupo_ou_a_de_todos():
+    refeicoes = pd.DataFrame(
+        [
+            refeicao(participante=1, minutos_ativos_60=10.0),
+            refeicao(participante=2, minutos_ativos_60=30.0),
+            refeicao(participante=3, minutos_ativos_60=np.nan),
+            refeicao(participante=4, grupo="dm2", minutos_ativos_60=50.0),
+            refeicao(participante=5, grupo="pre_diabetes", minutos_ativos_60=np.nan),
+        ]
+    )
+
+    caminhada = perfis_das_refeicoes(refeicoes)["caminhada_almoco"]
+
+    assert caminhada[3] == pytest.approx(20.0)
+    assert caminhada[5] == pytest.approx(30.0)
+    assert caminhada.notna().all()
+
+
+def test_quem_nao_jantou_tem_a_caminhada_do_jantar_do_grupo():
+    refeicoes = pd.DataFrame(
+        [
+            refeicao(participante=1, tipo="jantar", minutos_ativos_60=4.0),
+            refeicao(participante=2, tipo="jantar", minutos_ativos_60=8.0),
+            refeicao(participante=3, tipo="almoco", minutos_ativos_60=40.0),
+        ]
+    )
+
+    perfil = perfis_das_refeicoes(refeicoes).loc[3]
+
+    assert perfil["caminhada_jantar"] == pytest.approx(6.0)
+    assert np.isnan(perfil["carbo_jantar"])
 
 
 def test_fibra_acima_do_carbo_fica_fora_da_media_da_fibra_mas_o_carbo_conta():

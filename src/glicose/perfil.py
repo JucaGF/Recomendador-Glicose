@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 
 from glicose.cardapio import fibra_cabe_no_carbo
-from glicose.esquema import DIAS_HABITO, MACROS, PERFIS, conformar
+from glicose.esquema import DIAS_HABITO, MACROS, PERFIS, TIPOS_REFEICAO, conformar
 
 COLUNAS_BIO = {
     "subject": "participante",
@@ -16,6 +16,7 @@ COLUNAS_BIO = {
 
 PONTOS_DE_UMA_RETA_EXATA = 2
 MINIMO_REFEICOES_RETA = PONTOS_DE_UMA_RETA_EXATA + 1
+CAMINHADA = [f"caminhada_{tipo}" for tipo in TIPOS_REFEICAO]
 
 
 def sensibilidade_carbo(refeicoes_pessoa: pd.DataFrame) -> float:
@@ -27,7 +28,10 @@ def sensibilidade_carbo(refeicoes_pessoa: pd.DataFrame) -> float:
 
 def montar_perfis(refeicoes: pd.DataFrame, dias: pd.DataFrame, bio: pd.DataFrame) -> pd.DataFrame:
     habito = refeicoes[refeicoes["dia"].isin(DIAS_HABITO)]
-    habito = habito.assign(fibra=habito["fibra"].where(fibra_cabe_no_carbo(habito)))
+    habito = habito.assign(
+        fibra=habito["fibra"].where(fibra_cabe_no_carbo(habito)),
+        caminhada=habito["minutos_ativos_60"],
+    )
     dias_habito = dias[dias["dia"].isin(DIAS_HABITO)]
 
     # O cabeçalho do bio.csv traz "Insulin " com um espaço no fim.
@@ -45,7 +49,10 @@ def montar_perfis(refeicoes: pd.DataFrame, dias: pd.DataFrame, bio: pd.DataFrame
         .rename("sensibilidade_carbo")
     )
     por_tipo = habito.pivot_table(
-        index="participante", columns="tipo", values=[*MACROS, "horario"], aggfunc="mean"
+        index="participante",
+        columns="tipo",
+        values=[*MACROS, "horario", "caminhada"],
+        aggfunc="mean",
     )
     por_tipo.columns = [f"{coluna}_{tipo}" for coluna, tipo in por_tipo.columns]
 
@@ -56,5 +63,9 @@ def montar_perfis(refeicoes: pd.DataFrame, dias: pd.DataFrame, bio: pd.DataFrame
         .join(sensibilidade, on="participante")
         .join(por_tipo, on="participante")
         .reindex(columns=list(PERFIS))
+    )
+    mediana_do_grupo = perfis.groupby("grupo")[CAMINHADA].transform("median")
+    perfis[CAMINHADA] = (
+        perfis[CAMINHADA].fillna(mediana_do_grupo).fillna(perfis[CAMINHADA].median())
     )
     return conformar(perfis, PERFIS)

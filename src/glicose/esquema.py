@@ -60,7 +60,11 @@ PERFIS = {
     "sensibilidade_carbo": "float64",
     "kcal_dia": "float64",
     "proteina_dia": "float64",
-    **{f"{coluna}_{tipo}": "float64" for tipo in TIPOS_REFEICAO for coluna in (*MACROS, "horario")},
+    **{
+        f"{coluna}_{tipo}": "float64"
+        for tipo in TIPOS_REFEICAO
+        for coluna in (*MACROS, "horario", "caminhada")
+    },
 }
 
 CARDAPIO = {
@@ -221,9 +225,13 @@ def _dias(refeicoes):
 
 def _perfis(perfis_base, refeicoes, dias):
     habito = refeicoes[refeicoes["dia"].isin(DIAS_HABITO)]
+    habito = habito.assign(caminhada=habito["minutos_ativos_60"])
     dias_habito = dias[dias["dia"].isin(DIAS_HABITO)]
     por_tipo = habito.pivot_table(
-        index="participante", columns="tipo", values=[*MACROS, "horario"], aggfunc="mean"
+        index="participante",
+        columns="tipo",
+        values=[*MACROS, "horario", "caminhada"],
+        aggfunc="mean",
     )
     por_tipo.columns = [f"{coluna}_{tipo}" for coluna, tipo in por_tipo.columns]
     resumo = dias_habito.groupby("participante").agg(
