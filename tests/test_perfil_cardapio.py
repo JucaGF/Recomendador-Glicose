@@ -3,7 +3,7 @@ import pandas as pd
 import pytest
 
 from glicose.cardapio import montar_cardapio
-from glicose.esquema import DIAS_HABITO, DIAS_PLANO, dados_sinteticos
+from glicose.esquema import DIAS_HABITO, DIAS_PLANO, MACROS, dados_sinteticos
 from glicose.perfil import montar_perfis
 
 
@@ -22,7 +22,7 @@ def bio_do_csv(perfis: pd.DataFrame) -> pd.DataFrame:
 
 
 def refeicao(**colunas) -> dict:
-    return {
+    linha = {
         "participante": 1,
         "dia": 1,
         "tipo": "almoco",
@@ -31,12 +31,13 @@ def refeicao(**colunas) -> dict:
         "proteina": 20.0,
         "gordura": 10.0,
         "fibra": 5.0,
-        "kcal": 370.0,
         "grupo": "saudavel",
         "foto": "CGMacros/CGMacros-001/photos/a.jpg",
         "iauc_dexcom": 2000.0,
         **colunas,
     }
+    kcal_dos_macros = 4 * linha["carbo"] + 4 * linha["proteina"] + 9 * linha["gordura"]
+    return {"kcal": kcal_dos_macros, **linha}
 
 
 def test_mudar_os_dias_do_plano_nao_muda_o_perfil():
@@ -141,3 +142,79 @@ def test_prato_repetido_vira_um_prato_com_foto():
     jantar = cardapio.iloc[1]
     assert jantar["foto"] == "CGMacros/CGMacros-003/photos/b.jpg"
     assert jantar["participante_origem"] == 3
+
+
+def test_quem_nao_jantou_nos_dias_de_habito_tem_perfil_sem_habito_de_jantar():
+    dados = dados_sinteticos(n_participantes=3, semente=2)
+    refeicoes = dados["refeicoes"]
+    jantar_do_1 = (
+        (refeicoes["participante"] == 1)
+        & refeicoes["dia"].isin(DIAS_HABITO)
+        & (refeicoes["tipo"] == "jantar")
+    )
+
+    perfis = montar_perfis(refeicoes[~jantar_do_1], dados["dias"], bio_do_csv(dados["perfis"]))
+
+    perfil = perfis.set_index("participante").loc[1]
+    habito_jantar = [f"{coluna}_jantar" for coluna in (*MACROS, "horario")]
+    assert jantar_do_1.any()
+    assert perfil[habito_jantar].isna().all()
+    outras = perfil.drop([*habito_jantar, "grupo", "sexo"]).astype(float)
+    assert np.isfinite(outras).all()
+
+
+def test_kcal_que_nao_bate_com_os_macros_fica_fora_do_cardapio():
+    refeicoes = pd.DataFrame(
+        [
+            refeicao(tipo="jantar", carbo=0.0, proteina=10.0, gordura=0.0, kcal=420.0),
+            refeicao(tipo="jantar", carbo=761.0, proteina=20.0, gordura=10.0, kcal=1030.0),
+            refeicao(tipo="jantar", carbo=60.0, kcal=500.0),
+        ]
+    )
+
+    cardapio = montar_cardapio(refeicoes)
+
+    assert cardapio["carbo"].tolist() == [60.0]
+
+
+def test_prato_quase_vazio_fica_fora_do_cardapio():
+    refeicoes = pd.DataFrame(
+        [
+            refeicao(tipo="jantar", carbo=0.0, proteina=0.0, gordura=0.0, fibra=1.0, kcal=10.0),
+            refeicao(tipo="jantar", carbo=10.0, proteina=0.0, gordura=0.0),
+            refeicao(tipo="jantar", carbo=30.0),
+        ]
+    )
+
+    cardapio = montar_cardapio(refeicoes)
+
+    assert cardapio["carbo"].tolist() == [30.0]
+
+
+def test_gemeo_de_digitacao_vira_o_prato_mais_registrado():
+    foto_mais_vista = "CGMacros/CGMacros-002/photos/b.jpg"
+    refeicoes = pd.DataFrame(
+        [
+            refeicao(participante=1, fibra=6.0, foto="CGMacros/CGMacros-001/photos/a.jpg"),
+            *[refeicao(participante=2, foto=foto_mais_vista) for _ in range(3)],
+            refeicao(participante=3, carbo=53.0),
+            refeicao(participante=4, tipo="jantar", fibra=6.0),
+        ]
+    )
+
+    cardapio = montar_cardapio(refeicoes)
+
+    almoco = cardapio[cardapio["tipo"] == "almoco"]
+    assert almoco["carbo"].tolist() == [50.0, 53.0]
+    assert almoco.iloc[0]["fibra"] == 5.0
+    assert almoco.iloc[0]["foto"] == foto_mais_vista
+    assert almoco.iloc[0]["participante_origem"] == 2
+    assert (cardapio["tipo"] == "jantar").sum() == 1
+
+
+def test_mesmos_macros_com_duas_kcal_ficam_com_a_mais_registrada():
+    refeicoes = pd.DataFrame([refeicao(kcal=380.0), refeicao(kcal=370.0), refeicao(kcal=370.0)])
+
+    cardapio = montar_cardapio(refeicoes)
+
+    assert cardapio["kcal"].tolist() == [370.0]
