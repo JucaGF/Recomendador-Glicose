@@ -30,7 +30,23 @@ MACROS = ["carbo", "proteina", "gordura", "fibra", "kcal"]
 
 
 def calcular_iauc(minutos: np.ndarray, glicose: np.ndarray, base: float) -> float:
-    return float(np.trapezoid(np.clip(glicose - base, 0, None), minutos))
+    alturas = np.asarray(glicose, dtype=float) - base
+    larguras = np.diff(minutos)
+    trechos = zip(larguras, alturas[:-1], alturas[1:], strict=True)
+    return float(sum(area_acima_da_base(*trecho) for trecho in trechos))
+
+
+def area_acima_da_base(largura: float, altura_inicial: float, altura_final: float) -> float:
+    if altura_inicial >= 0 and altura_final >= 0:
+        return largura * (altura_inicial + altura_final) / 2
+    if altura_inicial <= 0 and altura_final <= 0:
+        return 0.0
+    # O trecho cruza a base. Só o triângulo acima dela conta, e a largura dele sai da semelhança
+    # de triângulos.
+    topo = max(altura_inicial, altura_final)
+    fundo = min(altura_inicial, altura_final)
+    largura_acima = largura * topo / (topo - fundo)
+    return largura_acima * topo / 2
 
 
 def janela_limpa(instantes_refeicoes: pd.DatetimeIndex, inicio: pd.Timestamp) -> bool:
