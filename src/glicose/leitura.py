@@ -33,7 +33,8 @@ TOLERANCIA_COTOVELO = 1e-3
 
 MINUTOS_DIA = 24 * 60
 # Um dia com menos de 80% de glicose ou menos de 2 refeições registradas não mostra o hábito
-# do dia inteiro. O dia de chegada tem no máximo 68% e sempre fica de fora.
+# do dia inteiro. O dia de chegada tem no máximo 68% e sempre fica de fora. A cobertura conta só
+# o Dexcom, que é o sensor do alvo e do perfil.
 COBERTURA_MINIMA_DIA = 0.8
 REFEICOES_MINIMAS_DIA = 2
 
@@ -108,11 +109,11 @@ def mais_comum(valores: pd.Series) -> int:
 
 def dias_validos(tabela: pd.DataFrame) -> pd.DataFrame:
     principais = tabela["refeicao"].isin(TIPOS_REFEICAO.values())
-    com_cgm = tabela[["dexcom", "libre"]].notna().any(axis=1)
+    com_dexcom = tabela["dexcom"].notna()
     data = tabela.index.normalize()
     dias = pd.DataFrame(
         {
-            "cobertura_cgm": com_cgm.groupby(data).sum() / MINUTOS_DIA,
+            "cobertura_cgm": com_dexcom.groupby(data).sum() / MINUTOS_DIA,
             "n_refeicoes": principais.groupby(data).sum(),
         }
     )
