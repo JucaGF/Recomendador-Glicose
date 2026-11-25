@@ -177,6 +177,19 @@ def test_kcal_que_nao_bate_com_os_macros_fica_fora_do_cardapio():
     assert cardapio["carbo"].tolist() == [60.0]
 
 
+def test_fibra_acima_do_carbo_fica_fora_do_cardapio():
+    refeicoes = pd.DataFrame(
+        [
+            refeicao(tipo="jantar", carbo=40.0, fibra=2199.0),
+            refeicao(tipo="jantar", carbo=30.0, fibra=30.0),
+        ]
+    )
+
+    cardapio = montar_cardapio(refeicoes)
+
+    assert cardapio["carbo"].tolist() == [30.0]
+
+
 def test_prato_quase_vazio_fica_fora_do_cardapio():
     refeicoes = pd.DataFrame(
         [

@@ -21,6 +21,11 @@ def kcal_confere_com_macros(pratos: pd.DataFrame) -> pd.Series:
     return (pratos["kcal"] - estimada).abs() <= DESVIO_MAXIMO_KCAL_DOS_MACROS * estimada
 
 
+def fibra_cabe_no_carbo(pratos: pd.DataFrame) -> pd.Series:
+    # A fibra é parte do carboidrato total, então fibra acima do carbo é erro de registro.
+    return pratos["fibra"] <= pratos["carbo"]
+
+
 def representantes(macros: np.ndarray) -> list[int]:
     escolhidos: list[int] = []
     for linha, valores in enumerate(macros):
@@ -41,7 +46,9 @@ def montar_cardapio(refeicoes: pd.DataFrame) -> pd.DataFrame:
     com_foto = com_macros[com_macros["foto"].notna()]
     nao_zerados = com_foto[com_foto[macros].ne(0).any(axis=1)]
     validos = nao_zerados[
-        kcal_confere_com_macros(nao_zerados) & (nao_zerados["kcal"] >= KCAL_MINIMA_PRATO)
+        kcal_confere_com_macros(nao_zerados)
+        & (nao_zerados["kcal"] >= KCAL_MINIMA_PRATO)
+        & fibra_cabe_no_carbo(nao_zerados)
     ]
 
     variantes = (
