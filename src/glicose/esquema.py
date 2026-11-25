@@ -80,6 +80,20 @@ TABELAS = {"refeicoes": REFEICOES, "dias": DIAS, "perfis": PERFIS, "cardapio": C
 DIAS_HABITO = range(1, 7)
 DIAS_PLANO = range(7, 10)
 
+# Fórmula ADAG (Nathan et al., 2008), com HbA1c em %.
+ADAG_MGDL_POR_PONTO_HBA1C = 28.7
+ADAG_INTERCEPTO_MGDL = -46.7
+# Apêndice A do plano: no CGMacros o jejum do Dexcom fica 12,5 mg/dL acima do laboratório.
+VIES_JEJUM_CGM_MGDL = 12.5
+BASE_TRIANGULO_IAUC_MIN = 90
+MINUTOS_POR_DIA = 24 * 60
+# Mediana, mínimo e máximo medidos no CGMacros (Apêndice A do plano).
+HORAS_DESDE_REFEICAO_ANTERIOR = {
+    "cafe": (8.3, 6.0, 10.5),
+    "almoco": (4.2, 3.0, 6.5),
+    "jantar": (5.9, 3.0, 8.5),
+}
+
 
 def pasta_dados() -> Path:
     return Path(os.environ.get("GLICOSE_DADOS", "data")).expanduser()
@@ -87,6 +101,10 @@ def pasta_dados() -> Path:
 
 def conformar(tabela: pd.DataFrame, colunas: dict[str, str]) -> pd.DataFrame:
     return tabela[list(colunas)].astype(colunas).reset_index(drop=True)
+
+
+def inclinacao(x: pd.Series, y: pd.Series) -> float:
+    return float(np.polyfit(x, y, 1)[0])
 
 
 def dados_sinteticos(n_participantes: int, semente: int) -> dict[str, pd.DataFrame]:
@@ -132,6 +150,7 @@ def _perfis_base(rng, n_participantes):
     hba1c_por_grupo = {"saudavel": 5.3, "pre_diabetes": 6.0, "dm2": 7.4}
     sensibilidade_por_grupo = {"saudavel": 25.0, "pre_diabetes": 35.0, "dm2": 50.0}
     hba1c = np.array([hba1c_por_grupo[g] for g in grupos]) + rng.normal(0, 0.15, n_participantes)
+    glicose_estimada = ADAG_MGDL_POR_PONTO_HBA1C * hba1c + ADAG_INTERCEPTO_MGDL
     return pd.DataFrame(
         {
             "participante": np.arange(1, n_participantes + 1),
@@ -140,19 +159,27 @@ def _perfis_base(rng, n_participantes):
             "sexo": rng.choice(["F", "M"], n_participantes),
             "imc": rng.uniform(19, 38, n_participantes),
             "hba1c": hba1c,
-            "glicose_jejum_lab": 28.7 * hba1c - 46.7 + rng.normal(0, 5, n_participantes),
+            "glicose_jejum_lab": glicose_estimada + rng.normal(0, 5, n_participantes),
             "insulina_jejum": rng.uniform(2, 25, n_participantes),
             "sensibilidade_real": [sensibilidade_por_grupo[g] for g in grupos],
         }
     )
 
 
+def _horarios_do_dia(rng):
+    horarios, horario = {}, 0.0
+    for tipo, (mediana, minimo, maximo) in HORAS_DESDE_REFEICAO_ANTERIOR.items():
+        horario += float(np.clip(rng.normal(mediana, 0.8), minimo, maximo))
+        horarios[tipo] = horario
+    return horarios
+
+
 def _refeicoes_sinteticas(rng, cardapio, perfis_base):
-    horario_tipico = {"cafe": 8.0, "almoco": 12.5, "jantar": 19.0}
     linhas = []
     for perfil in perfis_base.itertuples():
-        jejum = perfil.glicose_jejum_lab + 12.5
+        jejum = perfil.glicose_jejum_lab + VIES_JEJUM_CGM_MGDL
         for dia in range(1, DIAS_PLANO.stop):
+            horarios = _horarios_do_dia(rng)
             for tipo in TIPOS_REFEICAO:
                 prato = cardapio[cardapio["tipo"] == tipo].sample(1, random_state=rng).iloc[0]
                 minutos = float(rng.choice([0, 0, 0, 10, 20, 30]))
@@ -165,14 +192,14 @@ def _refeicoes_sinteticas(rng, cardapio, perfis_base):
                         "participante": perfil.participante,
                         "dia": dia,
                         "tipo": tipo,
-                        "horario": horario_tipico[tipo] + rng.normal(0, 0.5),
+                        "horario": horarios[tipo],
                         **prato[[*MACROS, "kcal", "foto"]].to_dict(),
                         "glicose_pre": glicose_pre,
                         "minutos_ativos_60": minutos,
                         "grupo": perfil.grupo,
                         "iauc_dexcom": iauc,
                         "iauc_libre": iauc * rng.normal(1.0, 0.1),
-                        "pico": glicose_pre + iauc / 45,
+                        "pico": glicose_pre + 2 * iauc / BASE_TRIANGULO_IAUC_MIN,
                     }
                 )
     return pd.DataFrame(linhas)
@@ -183,9 +210,10 @@ def _dias(refeicoes):
         n_refeicoes=("tipo", "size"),
         kcal=("kcal", "sum"),
         proteina=("proteina", "sum"),
-        glicose_media=("pico", "mean"),
         glicose_jejum_cgm=("glicose_pre", "min"),
+        iauc_dia=("iauc_dexcom", "sum"),
     )
+    dias["glicose_media"] = dias["glicose_jejum_cgm"] + dias["iauc_dia"] / MINUTOS_POR_DIA
     dias["data"] = pd.Timestamp("2024-01-01") + pd.to_timedelta(dias["dia"], unit="D")
     dias["cobertura_cgm"] = 0.95
     return dias
@@ -204,10 +232,9 @@ def _perfis(perfis_base, refeicoes, dias):
         kcal_dia=("kcal", "mean"),
         proteina_dia=("proteina", "mean"),
     )
-    sensibilidade = (
-        habito.groupby("participante")
-        .apply(lambda r: np.polyfit(r["carbo"], r["iauc_dexcom"], 1)[0], include_groups=False)
-        .rename("sensibilidade_carbo")
+    sensibilidade = pd.Series(
+        {p: inclinacao(r["carbo"], r["iauc_dexcom"]) for p, r in habito.groupby("participante")},
+        name="sensibilidade_carbo",
     )
     return (
         perfis_base.join(resumo, on="participante")

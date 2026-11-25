@@ -5,6 +5,7 @@ import sys
 import zipfile
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 import baixar_dados
@@ -119,3 +120,42 @@ def test_dados_sinteticos_repetem_com_a_mesma_semente():
     segunda = esquema.dados_sinteticos(3, semente=7)
     for nome in esquema.TABELAS:
         assert primeira[nome].equals(segunda[nome]), nome
+
+
+@pytest.fixture(scope="module")
+def sinteticos():
+    return esquema.dados_sinteticos(n_participantes=12, semente=3)
+
+
+def test_dados_sinteticos_tem_macros_e_calorias_coerentes(sinteticos):
+    for nome in ("refeicoes", "cardapio"):
+        tabela = sinteticos[nome]
+        assert (tabela[list(esquema.MACROS)] >= 0).all().all(), nome
+        kcal = 4 * tabela["carbo"] + 4 * tabela["proteina"] + 9 * tabela["gordura"]
+        np.testing.assert_allclose(tabela["kcal"], kcal, atol=0.01, err_msg=nome)
+
+
+def test_todo_participante_tem_os_dias_1_a_9(sinteticos):
+    for nome in ("refeicoes", "dias"):
+        dias = sinteticos[nome].groupby("participante")["dia"].unique()
+        assert dias.index.tolist() == list(range(1, 13)), nome
+        assert all(sorted(d) == list(range(1, 10)) for d in dias), nome
+
+
+def test_horarios_das_refeicoes_ficam_nos_limites_do_ag(sinteticos):
+    horarios = sinteticos["refeicoes"].pivot(
+        index=["participante", "dia"], columns="tipo", values="horario"
+    )
+    assert horarios["cafe"].between(6, 10.5).all()
+    assert (horarios["almoco"] - horarios["cafe"]).between(3, 6.5).all()
+    assert (horarios["jantar"] - horarios["almoco"]).between(3, 8.5).all()
+
+
+def test_glicose_media_fica_entre_o_jejum_e_os_picos(sinteticos):
+    refeicoes = sinteticos["refeicoes"]
+    habito = refeicoes[refeicoes["dia"].isin(esquema.DIAS_HABITO)]
+    media_dos_picos = habito.groupby("participante")["pico"].mean()
+    perfis = sinteticos["perfis"].set_index("participante")
+
+    assert (perfis["glicose_media"] < media_dos_picos).all()
+    assert (perfis["glicose_media"] > perfis["glicose_jejum_cgm"]).all()
