@@ -33,6 +33,7 @@ PASTA_ARTEFATOS = Path("artefatos")
 class ResultadoNSGA:
     frente: Populacao
     objetivos: np.ndarray
+    viavel: bool
     frentes_por_geracao: list[np.ndarray]
     avaliacoes: int
 
@@ -136,7 +137,7 @@ def rodar(config: ConfigAG, simular: Simulador, perfil, cardapio, semente: int) 
 
     Sem paciência, roda sempre todas as gerações e gasta (max_geracoes + 1) x tamanho_populacao
     avaliações. Se nenhum plano avaliado cabe nas restrições, a frente devolvida é a dos que
-    menos violam.
+    menos violam e `viavel` vem falso.
     """
     rng = np.random.default_rng(semente)
     vizinhos = vizinhos_prato(cardapio)
@@ -172,9 +173,22 @@ def rodar(config: ConfigAG, simular: Simulador, perfil, cardapio, semente: int) 
     return ResultadoNSGA(
         frente=frente,
         objetivos=objetivos_frente,
+        viavel=bool((violacao[posto == 0] == 0).all()),
         frentes_por_geracao=frentes_por_geracao,
         avaliacoes=len(frentes_por_geracao) * config.tamanho_populacao,
     )
+
+
+def ponto_de_joelho(objetivos: np.ndarray) -> int:
+    """Índice do plano da frente mais afastado da reta entre as duas pontas, com cada objetivo
+    levado para a escala de 0 a 1 pela amplitude da frente."""
+    if len(objetivos) == 1:
+        return 0
+    menor, maior = objetivos.min(axis=0), objetivos.max(axis=0)
+    normalizados = (objetivos - menor) / (maior - menor)
+    # Numa frente de dois objetivos as pontas viram (0, 1) e (1, 0). A distância até a reta entre
+    # elas, do lado dos objetivos menores, é (1 - f1 - f2) / raiz de 2.
+    return int(np.argmin(normalizados.sum(axis=1)))
 
 
 def desenhar_frentes(frentes: dict[str, tuple[np.ndarray, np.ndarray]], caminho: Path) -> None:
@@ -205,15 +219,15 @@ def main() -> None:
     frentes = {}
     for _, perfil in dados["perfis"].iterrows():
         resultado = rodar(ConfigAG(), simulador_falso, perfil, cardapio, args.semente)
-        violacoes = calcular_violacao(resultado.frente, perfil, cardapio) > 0
         ponto_habito = calcular_objetivos(
             habito(perfil, cardapio), simulador_falso, perfil, cardapio
         )
         print(f"participante {perfil['participante']} ({perfil['grupo']}), semente {args.semente}")
         print(f"tamanho da frente final: {len(resultado.frente)}")
-        print(f"planos da frente que violam kcal ou proteina: {violacoes.sum()}")
+        print(f"frente respeita kcal e proteina: {'sim' if resultado.viavel else 'nao'}")
         print(f"avaliacoes: {resultado.avaliacoes}")
-        print(pd.DataFrame(resultado.objetivos, columns=OBJETIVOS).round(2).to_string(index=False))
+        print(f"ponto de joelho: plano {ponto_de_joelho(resultado.objetivos)}")
+        print(pd.DataFrame(resultado.objetivos, columns=OBJETIVOS).round(2).to_string())
         print()
         frentes[f"participante {perfil['participante']}"] = (resultado.objetivos, ponto_habito[0])
 
