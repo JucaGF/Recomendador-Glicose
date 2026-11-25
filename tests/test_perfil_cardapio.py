@@ -40,6 +40,26 @@ def refeicao(**colunas) -> dict:
     return {"kcal": kcal_dos_macros, **linha}
 
 
+def perfis_das_refeicoes(refeicoes: pd.DataFrame) -> pd.DataFrame:
+    participantes = refeicoes["participante"].unique()
+    dias = refeicoes[["participante", "dia"]].drop_duplicates()
+    dias = dias.assign(kcal=1800.0, proteina=80.0, glicose_media=110.0, glicose_jejum_cgm=95.0)
+    bio = bio_do_csv(
+        pd.DataFrame(
+            {
+                "participante": participantes,
+                "idade": 40.0,
+                "sexo": "F",
+                "imc": 25.0,
+                "hba1c": 5.4,
+                "glicose_jejum_lab": 90.0,
+                "insulina_jejum": 8.0,
+            }
+        )
+    )
+    return montar_perfis(refeicoes, dias, bio).set_index("participante")
+
+
 def test_mudar_os_dias_do_plano_nao_muda_o_perfil():
     dados = dados_sinteticos(n_participantes=6, semente=0)
     bio = bio_do_csv(dados["perfis"])
@@ -96,6 +116,20 @@ def test_sensibilidade_e_a_constante_quando_a_iauc_e_proporcional_ao_carbo():
 
     assert perfil["sensibilidade_carbo"] == pytest.approx(inclinacao)
     assert perfil["glicose_media"] == pytest.approx(115.0)
+
+
+def test_fibra_acima_do_carbo_fica_fora_da_media_da_fibra_mas_o_carbo_conta():
+    refeicoes = pd.DataFrame(
+        [
+            refeicao(dia=1, tipo="jantar", carbo=50.0, fibra=5.0),
+            refeicao(dia=2, tipo="jantar", carbo=40.0, fibra=570.0),
+        ]
+    )
+
+    perfil = perfis_das_refeicoes(refeicoes).loc[1]
+
+    assert perfil["fibra_jantar"] == pytest.approx(5.0)
+    assert perfil["carbo_jantar"] == pytest.approx(45.0)
 
 
 def test_menos_de_3_refeicoes_nao_dao_sensibilidade():

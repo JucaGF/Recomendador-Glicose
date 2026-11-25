@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 
+from glicose.cardapio import fibra_cabe_no_carbo
 from glicose.esquema import DIAS_HABITO, MACROS, PERFIS, conformar
 
 COLUNAS_BIO = {
@@ -26,6 +27,7 @@ def sensibilidade_carbo(refeicoes_pessoa: pd.DataFrame) -> float:
 
 def montar_perfis(refeicoes: pd.DataFrame, dias: pd.DataFrame, bio: pd.DataFrame) -> pd.DataFrame:
     habito = refeicoes[refeicoes["dia"].isin(DIAS_HABITO)]
+    habito = habito.assign(fibra=habito["fibra"].where(fibra_cabe_no_carbo(habito)))
     dias_habito = dias[dias["dia"].isin(DIAS_HABITO)]
 
     # O cabeçalho do bio.csv traz "Insulin " com um espaço no fim.
