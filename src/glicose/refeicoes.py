@@ -42,12 +42,11 @@ def area_acima_da_base(largura: float, altura_inicial: float, altura_final: floa
         return largura * (altura_inicial + altura_final) / 2
     if altura_inicial <= 0 and altura_final <= 0:
         return 0.0
-    # O trecho cruza a base. Só o triângulo acima dela conta, e a largura dele sai da semelhança
-    # de triângulos.
     topo = max(altura_inicial, altura_final)
     fundo = min(altura_inicial, altura_final)
-    largura_acima = largura * topo / (topo - fundo)
-    return largura_acima * topo / 2
+    fracao_acima_da_base = topo / (topo - fundo)
+    largura_do_triangulo = largura * fracao_acima_da_base
+    return largura_do_triangulo * topo / 2
 
 
 def janela_limpa(instantes_refeicoes: pd.DatetimeIndex, inicio: pd.Timestamp) -> bool:
