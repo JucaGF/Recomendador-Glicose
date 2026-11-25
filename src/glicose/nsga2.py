@@ -49,7 +49,6 @@ def calcular_violacao(pop: Populacao, perfil, cardapio) -> np.ndarray:
 
 
 def domina(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    """a domina b quando não é pior em nenhum objetivo e é melhor em pelo menos um."""
     return (a <= b).all(axis=-1) & (a < b).any(axis=-1)
 
 
@@ -110,7 +109,6 @@ def classificar(objetivos: np.ndarray, violacao: np.ndarray) -> tuple[np.ndarray
 
 
 def sobreviventes(posto: np.ndarray, aglomeracao: np.ndarray, n: int) -> np.ndarray:
-    """Os n melhores: primeiro a frente de menor posto, e dentro dela os mais isolados."""
     ordem = sorted(range(len(posto)), key=lambda i: (posto[i], -aglomeracao[i]))
     return np.array(ordem[:n])
 
@@ -130,15 +128,10 @@ def primeira_frente_sem_repeticao(pop: Populacao, objetivos, posto) -> tuple[Pop
 
 
 def rodar(config: ConfigAG, simular: Simulador, perfil, cardapio, semente: int) -> ResultadoNSGA:
-    """Usa de ConfigAG o tamanho da população, o número de gerações e as taxas de mutação.
-    Ignora paciência, tamanho do torneio, elitismo e lambdas, porque o torneio é binário, a
-    sobrevivência já guarda os melhores, kcal e proteína são restrições e o hábito é o segundo
-    objetivo.
-
-    Sem paciência, roda sempre todas as gerações e gasta (max_geracoes + 1) x tamanho_populacao
-    avaliações. Se nenhum plano avaliado cabe nas restrições, a frente devolvida é a dos que
-    menos violam e `viavel` vem falso.
-    """
+    """Ignora paciência, tamanho do torneio, elitismo e lambdas de ConfigAG, porque o torneio é
+    binário, a sobrevivência já guarda os melhores, kcal e proteína são restrições e o hábito é o
+    segundo objetivo. Sem paciência, gasta sempre (max_geracoes + 1) x tamanho_populacao
+    avaliações."""
     rng = np.random.default_rng(semente)
     vizinhos = vizinhos_prato(cardapio)
     pop = populacao_inicial(config, perfil, cardapio, vizinhos, rng)
@@ -180,15 +173,13 @@ def rodar(config: ConfigAG, simular: Simulador, perfil, cardapio, semente: int) 
 
 
 def ponto_de_joelho(objetivos: np.ndarray) -> int:
-    """Índice do plano da frente mais afastado da reta entre as duas pontas, com cada objetivo
-    levado para a escala de 0 a 1 pela amplitude da frente."""
     if len(objetivos) == 1:
         return 0
     menor, maior = objetivos.min(axis=0), objetivos.max(axis=0)
     normalizados = (objetivos - menor) / (maior - menor)
-    # Numa frente de dois objetivos as pontas viram (0, 1) e (1, 0). A distância até a reta entre
-    # elas, do lado dos objetivos menores, é (1 - f1 - f2) / raiz de 2.
-    return int(np.argmin(normalizados.sum(axis=1)))
+    # Numa frente de dois objetivos as pontas viram (0, 1) e (1, 0), na reta f1 + f2 = 1.
+    distancia_da_reta = (1 - normalizados.sum(axis=1)) / np.sqrt(2)
+    return int(np.argmax(distancia_da_reta))
 
 
 def desenhar_frentes(frentes: dict[str, tuple[np.ndarray, np.ndarray]], caminho: Path) -> None:

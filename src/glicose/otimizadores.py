@@ -43,9 +43,7 @@ def busca_aleatoria(
 
 
 def menos_carbo(perfil: pd.Series, cardapio: pd.DataFrame) -> Populacao:
-    """Enumera todo café x almoço x jantar e repete em D7 a D9 o dia de menos carbo que respeita
-    kcal e proteína. Se nenhum dia respeita, fica o de menor penalidade e, no empate, o de menos
-    carbo. Horários são os do hábito e a caminhada é zero, para a comparação medir só os pratos."""
+    """Horário e caminhada vêm do hábito para a comparação medir só os pratos."""
     quantos = [len(pratos_do_tipo(cardapio, tipo)) for tipo in TIPOS_REFEICAO]
     dias = np.array(list(itertools.product(*map(range, quantos))))
     planos = habito(perfil, cardapio)[np.zeros(len(dias), dtype=int)]
@@ -54,4 +52,5 @@ def menos_carbo(perfil: pd.Series, cardapio: pd.DataFrame) -> Populacao:
         planos, perfil, cardapio
     )
     carbo = total_por_dia(planos, cardapio, "carbo").sum(axis=1)
-    return planos[np.lexsort((carbo, penalidade))[0]]
+    melhor = min(range(len(dias)), key=lambda i: (penalidade[i], carbo[i]))
+    return planos[melhor]

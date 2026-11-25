@@ -160,9 +160,8 @@ def test_ponto_de_joelho_de_frente_com_um_ponto_so():
     assert nsga2.ponto_de_joelho(np.array([[3.0, 4.0]])) == 0
 
 
-# O jantar 9 fica longe de todos os outros, então não é um dos 3 vizinhos de nenhum prato. A
-# mutação só chega nele quando sorteia qualquer prato do tipo, e o cruzamento só troca pratos que
-# já estão na população. O carbo de 5 g o identifica na entrada do simulador.
+# A mutação só chega no jantar 9 quando sorteia qualquer prato do tipo, e o cruzamento só troca
+# pratos que já estão na população.
 PRATOS_COM_ISOLADO = {
     "cafe": [prato(30, 15, 10, 3), prato(35, 15, 10, 3)],
     "almoco": [prato(50, 25, 15, 5), prato(55, 25, 15, 5)],
@@ -216,12 +215,17 @@ def test_busca_aleatoria_usa_exatamente_o_orcamento_do_ag():
 
 
 def cardapio_por_kcal(pratos_por_tipo: dict[str, list[tuple[float, float, float]]]):
-    """Cada prato é (kcal, carbo, proteina)."""
     return montar_cardapio(
         {
             tipo: [
-                {"carbo": c, "proteina": p, "gordura": k / 100, "fibra": c / 10, "kcal": k}
-                for k, c, p in pratos
+                {
+                    "carbo": carbo,
+                    "proteina": proteina,
+                    "gordura": kcal / 100,
+                    "fibra": carbo / 10,
+                    "kcal": kcal,
+                }
+                for kcal, carbo, proteina in pratos
             ]
             for tipo, pratos in pratos_por_tipo.items()
         }
