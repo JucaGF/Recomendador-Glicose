@@ -1,10 +1,12 @@
 import math
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 import keras
 import numpy as np
 import pandas as pd
+from matplotlib.figure import Figure
 from scipy.stats import reciprocal, uniform
 from sklearn.compose import TransformedTargetRegressor
 from sklearn.impute import SimpleImputer
@@ -18,6 +20,7 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import FunctionTransformer, StandardScaler
 
 from glicose.esquema import DIAS_HABITO, DIAS_PLANO
+from glicose.refeicoes import ARTEFATOS
 from glicose.simulador import (
     ALVOS,
     FRACAO_VALIDACAO,
@@ -33,6 +36,10 @@ N_FOLDS_BUSCA = 3
 ALVO_REDE = "log1p"
 PARAMETRO_REDE = "regressor__sklearnregressor__model_kwargs"
 PREFIXO_FIT = "sklearnregressor__"
+BUSCAS = {"genetica": "AG", "aleatoria": "busca aleatória (RandomizedSearchCV)"}
+ARQUIVO_TREINOS = "hiper_treinos.parquet"
+ARQUIVO_POPULACOES = "hiper_populacoes.parquet"
+ARQUIVO_FIGURA = "hiper_comparacao.png"
 
 
 @dataclass(frozen=True)
@@ -292,3 +299,73 @@ def rodar_buscas(dados: Dados, busca: ConfigBusca, semente: int) -> Resultado:
         ignore_index=True,
     )
     return Resultado(treinos, populacoes, {"genetica": meio - inicio, "aleatoria": fim - meio})
+
+
+def por_configuracao(treinos: pd.DataFrame) -> pd.DataFrame:
+    return treinos.groupby(["busca", *GENES], sort=False, as_index=False).agg(
+        mae=("mae", "mean"), treinos=("mae", "size"), epocas_min=("epocas", "min")
+    )
+
+
+def melhor_por_treinos(treinos: pd.DataFrame, busca: str) -> pd.Series:
+    configuracoes = por_configuracao(treinos[treinos["busca"] == busca])
+    return pd.Series(
+        configuracoes["mae"].cummin().to_numpy(), index=configuracoes["treinos"].cumsum()
+    )
+
+
+def desenhar_comparacao(treinos: pd.DataFrame, mae_padrao: float, caminho: Path) -> None:
+    figura = Figure(figsize=(7, 5))
+    eixo = figura.subplots()
+    for busca, rotulo in BUSCAS.items():
+        curva = melhor_por_treinos(treinos, busca)
+        eixo.step(curva.index, curva.to_numpy(), where="post", label=rotulo)
+    eixo.axhline(mae_padrao, linestyle="--", color="gray", label="configuração padrão de P3")
+    eixo.set_xlabel("treinos feitos")
+    eixo.set_ylabel(f"melhor MAE em D7 a D9, GroupKFold({N_FOLDS_BUSCA}) (mg/dL·min)")
+    eixo.set_title("Melhor MAE contra treinos: AG e busca aleatória")
+    eixo.legend()
+    caminho.parent.mkdir(parents=True, exist_ok=True)
+    figura.savefig(caminho, dpi=120, bbox_inches="tight")
+
+
+def config_padrao() -> Configuracao:
+    padrao = ConfigRede()
+    return {nome: getattr(padrao, nome) for nome in GENES}
+
+
+def main() -> None:
+    refeicoes = pd.read_parquet(ARTEFATOS / "refeicoes.parquet")
+    perfis = pd.read_parquet(ARTEFATOS / "perfis.parquet")
+    dados = preparar_dados(refeicoes, perfis, SEMENTE)
+    busca = ConfigBusca()
+
+    resultado = rodar_buscas(dados, busca, SEMENTE)
+    mae_padrao = treinar(dados, [config_padrao()], busca)["mae"].mean()
+
+    configuracoes = por_configuracao(resultado.treinos)
+    print(f"GroupKFold({N_FOLDS_BUSCA}) por participante, MAE em D7 a D9 (mg/dL·min)")
+    for nome in BUSCAS:
+        da_busca = configuracoes[configuracoes["busca"] == nome]
+        melhor = da_busca.loc[da_busca["mae"].idxmin()]
+        genes = ", ".join(f"{gene}={melhor[gene]:.4g}" for gene in GENES)
+        print(
+            f"\n{BUSCAS[nome]}: {da_busca['treinos'].sum()} treinos, {len(da_busca)} configurações"
+        )
+        print(
+            f"  {resultado.segundos[nome]:.0f} s, menor número de épocas de um treino: "
+            f"{da_busca['epocas_min'].min()}"
+        )
+        print(f"  melhor: {genes}")
+        print(f"  MAE {melhor['mae']:.1f}")
+    print(f"\nconfiguração padrão de P3 ({config_padrao()}): MAE {mae_padrao:.1f}")
+
+    ARTEFATOS.mkdir(exist_ok=True)
+    resultado.treinos.to_parquet(ARTEFATOS / ARQUIVO_TREINOS)
+    resultado.populacoes.to_parquet(ARTEFATOS / ARQUIVO_POPULACOES)
+    desenhar_comparacao(resultado.treinos, mae_padrao, ARTEFATOS / ARQUIVO_FIGURA)
+    print(f"gravado em {ARTEFATOS / ARQUIVO_FIGURA}")
+
+
+if __name__ == "__main__":
+    main()
