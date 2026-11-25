@@ -92,8 +92,6 @@ def montar_atributos(refeicoes: pd.DataFrame, perfis: pd.DataFrame) -> pd.DataFr
         },
         index=refeicoes.index,
     ).astype("float64")
-    # A fibra faz parte do carbo total. Acima dele o registro está errado e vira valor ausente.
-    atributos["fibra"] = atributos["fibra"].where(atributos["fibra"] <= atributos["carbo"])
     return atributos
 
 
@@ -180,6 +178,9 @@ def prever_rede(
 
 def particao_do_estudo(refeicoes: pd.DataFrame, perfis: pd.DataFrame) -> Particao:
     estudo = refeicoes[refeicoes["dia"].isin(DIAS_ESTUDO)]
+    # A fibra faz parte do carbo total. Acima dele o registro está errado e vira valor ausente.
+    # A regra fica nos dados do estudo, porque no prever a fibra passaria a mudar com o carbo.
+    estudo = estudo.assign(fibra=estudo["fibra"].where(estudo["fibra"] <= estudo["carbo"]))
     return Particao(estudo, montar_atributos(estudo, perfis))
 
 

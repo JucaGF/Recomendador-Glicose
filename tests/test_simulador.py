@@ -146,14 +146,15 @@ def test_prever_monta_as_mesmas_entradas_que_o_treino(simulador, sinteticos):
     )
 
 
-def test_fibra_acima_do_carbo_vale_como_ausente(simulador, plano):
-    perfil, refeicoes = plano
-    impossivel = refeicoes.assign(fibra=FIBRA_IMPOSSIVEL_G)
-    ausente = refeicoes.assign(fibra=np.nan)
+def test_fibra_acima_do_carbo_vale_como_ausente_no_estudo(sinteticos):
+    refeicoes = sinteticos["refeicoes"].copy()
+    refeicoes.loc[refeicoes.index[:3], "fibra"] = FIBRA_IMPOSSIVEL_G
 
-    np.testing.assert_allclose(
-        simulador.prever(perfil, impossivel), simulador.prever(perfil, ausente)
-    )
+    estudo = particao_do_estudo(refeicoes, sinteticos["perfis"])
+
+    impossivel = estudo.refeicoes.index.isin(refeicoes.index[:3])
+    assert estudo.atributos.loc[impossivel, "fibra"].isna().all()
+    assert estudo.atributos.loc[~impossivel, "fibra"].notna().all()
 
 
 def test_simulador_gravado_e_lido_preve_o_mesmo(simulador, plano, tmp_path):
