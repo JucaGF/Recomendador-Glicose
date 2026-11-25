@@ -69,7 +69,21 @@ def test_script_sai_com_erro_no_zip_corrompido(tmp_path):
 
     assert resultado.returncode != 0
     assert "checksum" in resultado.stderr
+    assert f"Apague {tmp_path / baixar_dados.NOME_ZIP} e rode de novo" in resultado.stderr
     assert not (tmp_path / "CGMacros").exists()
+
+
+def test_falha_de_rede_vira_uma_linha_de_erro(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("GLICOSE_DADOS", str(tmp_path))
+    ausente = (tmp_path / "nao_existe.zip").as_uri()
+
+    codigo = baixar_dados.main(url=ausente)
+
+    erro = capsys.readouterr().err
+    assert codigo != 0
+    assert erro.startswith(f"erro: não foi possível baixar {ausente}")
+    assert erro.count("\n") == 1
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_download_confere_checksum_antes_de_gravar_o_zip(tmp_path):
