@@ -1,7 +1,7 @@
 import argparse
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import keras
@@ -16,6 +16,7 @@ from sklearn.model_selection import (
     GroupKFold,
     ParameterSampler,
     RandomizedSearchCV,
+    train_test_split,
 )
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
@@ -24,6 +25,7 @@ from glicose.esquema import DIAS_HABITO, DIAS_PLANO
 from glicose.refeicoes import ARTEFATOS
 from glicose.simulador import (
     FRACAO_VALIDACAO,
+    IAUC_MINIMA,
     SEMENTE,
     ConfigRede,
     construir_modelo,
@@ -33,6 +35,7 @@ from glicose.simulador import (
 Configuracao = dict[str, int | float]
 
 N_FOLDS_BUSCA = 3
+FRACAO_TESTE_FINAL = 1 / 3
 PARAMETRO_REDE = "regressor__sklearnregressor__model_kwargs"
 PREFIXO_FIT = "sklearnregressor__"
 BUSCAS = {"genetica": "AG", "aleatoria": "busca aleatória (RandomizedSearchCV)"}
@@ -41,6 +44,7 @@ N_SEMENTES_PADRAO = 1
 ARQUIVO_TREINOS = "hiper_treinos.parquet"
 ARQUIVO_POPULACOES = "hiper_populacoes.parquet"
 ARQUIVO_FIGURA = "hiper_comparacao.png"
+ARQUIVO_TESTE_FINAL = "hiper_teste_final.parquet"
 
 
 @dataclass(frozen=True)
@@ -92,7 +96,9 @@ class ConfigBusca:
 class Dados:
     atributos: pd.DataFrame
     iauc: np.ndarray
+    participantes: np.ndarray
     divisoes: list[tuple[np.ndarray, np.ndarray]]
+    teste_final: tuple[np.ndarray, np.ndarray]
 
 
 @dataclass(frozen=True)
@@ -136,14 +142,26 @@ def preparar_dados(refeicoes: pd.DataFrame, perfis: pd.DataFrame, semente: int) 
     habito = estudo.refeicoes["dia"].isin(DIAS_HABITO).to_numpy()
     plano = estudo.refeicoes["dia"].isin(DIAS_PLANO).to_numpy()
     rng = np.random.default_rng(semente)
+
+    def divisao(treino: np.ndarray, teste: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        treino = agrupar_e_cortar_para_validacao(treino[habito[treino]], participantes, rng)
+        return treino, teste[plano[teste]]
+
+    # A busca escolhe pelo MAE das dobras de ajuste. Medir a escolhida nessas mesmas dobras
+    # premiaria a sorte da escolha, então o MAE que se reporta vem de participantes que a busca
+    # nunca viu.
+    grupos = estudo.refeicoes.groupby("participante")["grupo"].first()
+    _, finais = train_test_split(
+        grupos.index, test_size=FRACAO_TESTE_FINAL, stratify=grupos, random_state=semente
+    )
+    final = np.isin(participantes, finais)
+    ajuste = np.flatnonzero(~final)
     divisoes = [
-        (
-            agrupar_e_cortar_para_validacao(treino[habito[treino]], participantes, rng),
-            teste[plano[teste]],
-        )
-        for treino, teste in GroupKFold(N_FOLDS_BUSCA).split(estudo.atributos, groups=participantes)
+        divisao(ajuste[treino], ajuste[teste])
+        for treino, teste in GroupKFold(N_FOLDS_BUSCA).split(ajuste, groups=participantes[ajuste])
     ]
-    return Dados(estudo.atributos, estudo.iauc, divisoes)
+    teste_final = divisao(ajuste, np.flatnonzero(final))
+    return Dados(estudo.atributos, estudo.iauc, participantes, divisoes, teste_final)
 
 
 def construir_com_semente_fixa(X, y, **genes) -> keras.Model:
@@ -153,12 +171,22 @@ def construir_com_semente_fixa(X, y, **genes) -> keras.Model:
     return construir_modelo(ConfigRede(**genes))
 
 
+class EscalaDaIauc(StandardScaler):
+    # Mesmo piso e teto de Simulador.para_iauc, para a busca medir o erro do simulador de P3.
+    def fit(self, X, y=None, sample_weight=None):
+        self.iauc_maxima_ = float(np.max(X))
+        return super().fit(X, y, sample_weight)
+
+    def inverse_transform(self, X, copy=None):
+        return np.clip(super().inverse_transform(X, copy=copy), IAUC_MINIMA, self.iauc_maxima_)
+
+
 def estimador() -> TransformedTargetRegressor:
     rede = keras.wrappers.SKLearnRegressor(model=construir_com_semente_fixa)
     imputacao = SimpleImputer(strategy="median", keep_empty_features=True)
     return TransformedTargetRegressor(
         regressor=make_pipeline(imputacao, StandardScaler(), rede),
-        transformer=StandardScaler(),
+        transformer=EscalaDaIauc(),
     )
 
 
@@ -211,6 +239,12 @@ def treinar(dados: Dados, configs: list[Configuracao], busca: ConfigBusca) -> pd
     )
     grade.fit(dados.atributos, dados.iauc, **parametros_treino(busca.treino))
     return tabela_treinos(grade)
+
+
+def avaliar_no_teste_final(
+    dados: Dados, configs: list[Configuracao], busca: ConfigBusca
+) -> pd.DataFrame:
+    return treinar(replace(dados, divisoes=[dados.teste_final]), configs, busca)
 
 
 def busca_aleatoria(
@@ -335,7 +369,7 @@ def desenhar_comparacao(treinos: pd.DataFrame, mae_padrao: float, caminho: Path)
             eixo.step(curva.index, curva.to_numpy(), where="post", color=cor, label=rotulo_curva)
     eixo.axhline(mae_padrao, linestyle="--", color="gray", label="configuração padrão de P3")
     eixo.set_xlabel("treinos feitos")
-    eixo.set_ylabel(f"melhor MAE em D7 a D9, GroupKFold({N_FOLDS_BUSCA}) (mg/dL·min)")
+    eixo.set_ylabel(f"melhor MAE em D7 a D9, GroupKFold({N_FOLDS_BUSCA}) do ajuste (mg/dL·min)")
     eixo.set_title("Melhor MAE contra treinos: AG e busca aleatória")
     eixo.legend()
     caminho.parent.mkdir(parents=True, exist_ok=True)
@@ -367,30 +401,54 @@ def main() -> None:
     mae_padrao = treinar(dados, [config_padrao()], busca)["mae"].mean()
 
     configuracoes = por_configuracao(treinos)
-    print(f"GroupKFold({N_FOLDS_BUSCA}) por participante, MAE em D7 a D9 (mg/dL·min)")
-    print("cada treino é uma rede estruturada, não o conjunto de redes de P3")
+    melhores = configuracoes.loc[configuracoes.groupby(["semente", "busca"])["mae"].idxmin()]
+    padrao = pd.DataFrame([{**config_padrao(), "busca": "padrao", "mae": mae_padrao}])
+    escolhidas = pd.concat([melhores, padrao], ignore_index=True)
+    configs = escolhidas[list(GENES)].to_dict("records")
+    escolhidas["mae_teste"] = avaliar_no_teste_final(dados, configs, busca)["mae"].to_numpy()
+    por_busca = escolhidas.set_index(["semente", "busca"])
+
+    treino_final, teste_final = dados.teste_final
+    print(
+        f"ajuste: {len(np.unique(dados.participantes[treino_final]))} participantes, "
+        f"GroupKFold({N_FOLDS_BUSCA}); teste final: "
+        f"{len(np.unique(dados.participantes[teste_final]))} participantes fora da busca"
+    )
+    print("MAE em D7 a D9 (mg/dL·min); cada treino é uma rede estruturada, não o conjunto de P3")
     for semente, resultado in zip(sementes, resultados, strict=True):
         print(f"\nsemente {semente}")
         for nome, rotulo in BUSCAS.items():
             da_semente = da_busca(configuracoes, nome, semente)
-            melhor = da_semente.loc[da_semente["mae"].idxmin()]
+            melhor = por_busca.loc[(semente, nome)]
             genes = ", ".join(f"{gene}={melhor[gene]:.4g}" for gene in GENES)
             print(
                 f"  {rotulo}: {da_semente['treinos'].sum()} treinos, "
                 f"{len(da_semente)} configurações, {resultado.segundos[nome]:.0f} s, "
                 f"menor número de épocas de um treino: {da_semente['epocas_min'].min()}"
             )
-            print(f"    melhor: {genes}, MAE {melhor['mae']:.1f}")
+            print(
+                f"    melhor: {genes}, MAE no ajuste {melhor['mae']:.1f}, "
+                f"no teste final {melhor['mae_teste']:.1f}"
+            )
     if len(sementes) > 1:
-        melhores = configuracoes.groupby(["busca", "semente"])["mae"].min()
-        print(f"\nmelhor MAE das {len(sementes)} sementes, média e desvio")
+        print(f"\nmédia e desvio das {len(sementes)} sementes, ajuste e teste final")
         for nome, rotulo in BUSCAS.items():
-            print(f"  {rotulo}: {melhores[nome].mean():.1f} ({melhores[nome].std():.1f})")
-    print(f"\nconfiguração padrão de P3 ({config_padrao()}): MAE {mae_padrao:.1f}")
+            da_busca_toda = escolhidas[escolhidas["busca"] == nome]
+            ajuste, teste = da_busca_toda["mae"], da_busca_toda["mae_teste"]
+            print(
+                f"  {rotulo}: {ajuste.mean():.1f} ({ajuste.std():.1f}), "
+                f"{teste.mean():.1f} ({teste.std():.1f})"
+            )
+    padrao = escolhidas.iloc[-1]
+    print(
+        f"\nconfiguração padrão de P3 ({config_padrao()}): MAE no ajuste {padrao['mae']:.1f}, "
+        f"no teste final {padrao['mae_teste']:.1f}"
+    )
 
     ARTEFATOS.mkdir(exist_ok=True)
     treinos.to_parquet(ARTEFATOS / ARQUIVO_TREINOS)
     populacoes.to_parquet(ARTEFATOS / ARQUIVO_POPULACOES)
+    escolhidas.to_parquet(ARTEFATOS / ARQUIVO_TESTE_FINAL)
     desenhar_comparacao(treinos, mae_padrao, ARTEFATOS / ARQUIVO_FIGURA)
     print(f"gravado em {ARTEFATOS / ARQUIVO_FIGURA}")
 

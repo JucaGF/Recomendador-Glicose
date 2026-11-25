@@ -8,6 +8,7 @@ from glicose.ag_hiper import (
     cruzar,
     estimador,
     mutar,
+    parametros_treino,
     preparar_dados,
     rodar_buscas,
     sortear,
@@ -97,11 +98,11 @@ def test_cada_treino_dentro_da_busca_roda_mais_de_uma_epoca(resultado):
 
 
 def test_folds_separam_participantes_e_dias(dados, sinteticos):
-    refeicoes = particao_do_estudo(sinteticos["refeicoes"], sinteticos["perfis"]).refeicoes
-    participantes = refeicoes["participante"].to_numpy()
-    dias = refeicoes["dia"].to_numpy()
+    participantes = dados.participantes
+    dias = particao_do_estudo(sinteticos["refeicoes"], sinteticos["perfis"]).refeicoes["dia"]
+    dias = dias.to_numpy()
     testados = []
-    for treino, teste in dados.divisoes:
+    for treino, teste in [*dados.divisoes, dados.teste_final]:
         assert set(participantes[treino]).isdisjoint(participantes[teste])
         assert np.isin(dias[treino], DIAS_HABITO).all()
         assert np.isin(dias[teste], DIAS_PLANO).all()
@@ -112,6 +113,47 @@ def test_folds_separam_participantes_e_dias(dados, sinteticos):
         assert set(ajuste).isdisjoint(validacao)
         testados.extend(participantes[teste])
     assert sorted(set(testados)) == sorted(sinteticos["perfis"]["participante"])
+
+
+def test_participantes_do_teste_final_nunca_entram_nas_dobras_da_busca(dados, sinteticos):
+    treino_final, teste_final = dados.teste_final
+    finais = set(dados.participantes[teste_final])
+    na_busca = {
+        participante
+        for treino, teste in dados.divisoes
+        for participante in dados.participantes[np.concatenate([treino, teste])]
+    }
+
+    assert finais.isdisjoint(na_busca)
+    assert finais.isdisjoint(dados.participantes[treino_final])
+    assert len(finais) == round(N_PARTICIPANTES / 3)
+    perfis = sinteticos["perfis"].set_index("participante")
+    assert set(perfis.loc[sorted(finais), "grupo"]) == set(perfis["grupo"])
+
+
+def test_ag_e_busca_aleatoria_comecam_pelas_mesmas_configuracoes(resultado):
+    inicial = resultado.populacoes[resultado.populacoes["geracao"] == 0][list(GENES)]
+    aleatoria = resultado.treinos[resultado.treinos["busca"] == "aleatoria"][list(GENES)]
+    primeiras = aleatoria.drop_duplicates().head(BUSCA_RAPIDA.tamanho_populacao)
+    assert inicial.to_numpy().tolist() == primeiras.to_numpy().tolist()
+
+
+def test_previsao_fica_entre_zero_e_a_maior_iauc_do_treino(dados):
+    treino, teste = dados.divisoes[0]
+    modelo = estimador().fit(
+        dados.atributos.iloc[treino],
+        dados.iauc[treino],
+        **parametros_treino(ConfigRede(epocas=2)),
+    )
+    extremos = dados.atributos.iloc[teste]
+    previsto = np.concatenate(
+        [
+            modelo.predict(extremos.assign(carbo=extremos["carbo"] * 100)),
+            modelo.predict(extremos.assign(carbo=0.0, minutos_ativos_60=1e4)),
+        ]
+    )
+    assert previsto.min() == 0.0
+    assert previsto.max() == pytest.approx(dados.iauc[treino].max())
 
 
 def test_a_rede_le_carbo_e_caminhada_na_posicao_de_atributos(dados):
