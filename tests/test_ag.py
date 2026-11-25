@@ -44,6 +44,9 @@ def cardapio_pequeno(pratos: dict = PRATOS_PEQUENOS) -> pd.DataFrame:
     return conformar(cardapio, CARDAPIO)
 
 
+CAMINHADA_HABITO = {"cafe": 12.0, "almoco": 45.0, "jantar": 0.0}
+
+
 def perfil_pequeno() -> pd.Series:
     habito_por_tipo = {}
     for tipo, horario in zip(TIPOS_REFEICAO, (8.0, 12.5, 19.0), strict=True):
@@ -54,6 +57,7 @@ def perfil_pequeno() -> pd.Series:
             f"gordura_{tipo}": gordura,
             f"fibra_{tipo}": fibra,
             f"horario_{tipo}": horario,
+            f"caminhada_{tipo}": CAMINHADA_HABITO[tipo],
         }
     return pd.Series(
         {
@@ -355,3 +359,10 @@ def test_sem_dia_viavel_o_habito_e_o_dia_que_menos_sai_da_faixa():
     escolhido = plano.habito(perfil, cardapio_pequeno())
 
     assert escolhido.prato_no_tipo[0].tolist() == dia_de_mais_kcal
+
+
+def test_habito_caminha_o_que_a_pessoa_caminhou_em_cada_tipo_ate_o_limite_do_gene():
+    inicial = plano.habito(perfil_pequeno(), cardapio_pequeno())
+
+    limite = plano.LIMITES_CAMINHADA[1]
+    assert inicial.caminhada[0].tolist() == [12.0, limite, 0.0] * 3

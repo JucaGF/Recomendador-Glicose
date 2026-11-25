@@ -166,9 +166,10 @@ def habito(perfil: pd.Series, cardapio: pd.DataFrame) -> Populacao:
             for _, tipo in REFEICOES_PLANO
         ]
     )
+    caminhada = [perfil[f"caminhada_{tipo}"] for _, tipo in REFEICOES_PLANO]
     minimos, maximos = limites_intervalo()
     return Populacao(
         np.tile(melhor_dia, len(DIAS_PLANO))[None, :],
         np.clip(intervalo, minimos, maximos)[None, :],
-        np.zeros((1, N_REFEICOES)),
+        np.clip(caminhada, *LIMITES_CAMINHADA)[None, :],
     )
