@@ -1,3 +1,4 @@
+import keras
 import numpy as np
 import pandas as pd
 import pytest
@@ -32,6 +33,9 @@ FIBRA_IMPOSSIVEL_G = 2000.0
 TOLERANCIA_IAUC = 1e-4
 # A rede faz as contas em float32, que guarda uns 7 dígitos da iAUC em mg/dL·min.
 TOLERANCIA_FLOAT32 = 1e-5
+N_REFEICOES_GRADE = 20
+GRADE_CARBO_G = np.linspace(0, 150, 31)
+GRADE_CAMINHADA_MIN = np.linspace(0, CAMINHADA_MAXIMA, 31)
 
 
 @pytest.fixture(scope="module")
@@ -58,6 +62,14 @@ def plano(sinteticos):
         minutos_ativos_60=rng.uniform(0, CAMINHADA_MAXIMA, N_REFEICOES_PLANO),
     )
     return perfil, conformar(plano, ENTRADA_SIMULADOR)
+
+
+def curvas(simulador, perfil, refeicoes, coluna, grade):
+    repetidas = refeicoes.loc[refeicoes.index.repeat(len(grade))]
+    variando = repetidas.assign(
+        participante=perfil["participante"], **{coluna: np.tile(grade, len(refeicoes))}
+    )
+    return simulador.prever(perfil, variando).reshape(len(refeicoes), len(grade))
 
 
 def test_nenhum_participante_fica_no_treino_e_no_teste_do_mesmo_fold(sinteticos):
@@ -118,6 +130,38 @@ def test_media_do_participante_usa_so_d1_a_d6():
     previsto = media_participante(teste, teste)
 
     np.testing.assert_allclose(previsto, np.mean([100, 200, 300, 400, 500, 600]))
+
+
+def test_modelo_final_treina_com_d1_a_d6_de_todos_os_participantes(sinteticos, monkeypatch):
+    linhas_por_treino = []
+    fit_original = keras.Model.fit
+
+    def fit_espiao(modelo, x, y, **kwargs):
+        linhas_por_treino.append((len(x), "validation_data" in kwargs))
+        return fit_original(modelo, x, y, **kwargs)
+
+    monkeypatch.setattr(keras.Model, "fit", fit_espiao)
+    treinar_final(sinteticos["refeicoes"], sinteticos["perfis"], EPOCAS_RAPIDAS, CONFIG_RAPIDA)
+
+    refeicoes = sinteticos["refeicoes"]
+    habito = refeicoes[refeicoes["dia"].isin(DIAS_HABITO)]
+    assert habito["participante"].nunique() == N_PARTICIPANTES
+    assert linhas_por_treino == [(len(habito), False)] * CONFIG_RAPIDA.n_redes
+
+
+@pytest.mark.parametrize(
+    ("coluna", "grade", "sinal"),
+    [("carbo", GRADE_CARBO_G, 1), ("minutos_ativos_60", GRADE_CAMINHADA_MIN, -1)],
+)
+def test_carbo_so_sobe_e_caminhada_so_desce_a_iauc_prevista(
+    simulador, sinteticos, plano, coluna, grade, sinal
+):
+    _, refeicoes = plano
+    for _, perfil in sinteticos["perfis"].iterrows():
+        iauc = curvas(simulador, perfil, refeicoes.head(N_REFEICOES_GRADE), coluna, grade)
+        variacao = sinal * np.diff(iauc, axis=1)
+        assert (variacao >= 0).all()
+        assert (variacao > 0).any()
 
 
 def test_prever_devolve_um_valor_por_refeicao_na_ordem_de_entrada(simulador, plano):
