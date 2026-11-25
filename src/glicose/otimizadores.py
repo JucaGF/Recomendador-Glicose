@@ -1,9 +1,19 @@
+import itertools
+
 import numpy as np
 import pandas as pd
 
-from glicose.ag import FAIXA_KCAL, Lambdas, Resultado, Simulador, aptidao
-from glicose.esquema import TIPOS_REFEICAO
-from glicose.plano import REFEICOES_PLANO, Populacao, aleatoria, habito, pratos_do_tipo
+from glicose.ag import (
+    Lambdas,
+    Resultado,
+    Simulador,
+    aptidao,
+    penalidade_kcal,
+    penalidade_proteina,
+    total_por_dia,
+)
+from glicose.esquema import DIAS_PLANO, TIPOS_REFEICAO
+from glicose.plano import Populacao, aleatoria, habito, pratos_do_tipo
 
 __all__ = ["busca_aleatoria", "habito", "menos_carbo"]
 
@@ -33,25 +43,15 @@ def busca_aleatoria(
 
 
 def menos_carbo(perfil: pd.Series, cardapio: pd.DataFrame) -> Populacao:
-    kcal = {t: cardapio["kcal"].to_numpy()[pratos_do_tipo(cardapio, t)] for t in TIPOS_REFEICAO}
-    carbo = {t: cardapio["carbo"].to_numpy()[pratos_do_tipo(cardapio, t)] for t in TIPOS_REFEICAO}
-    minimo_dia = (1 - FAIXA_KCAL) * perfil["kcal_dia"]
-    maximo_dia = (1 + FAIXA_KCAL) * perfil["kcal_dia"]
-
-    escolha = {}
-    acumulado = 0.0
-    for k, tipo in enumerate(TIPOS_REFEICAO):
-        restantes = TIPOS_REFEICAO[k + 1 :]
-        menor_dia = acumulado + kcal[tipo] + sum(kcal[t].min() for t in restantes)
-        maior_dia = acumulado + kcal[tipo] + sum(kcal[t].max() for t in restantes)
-        falta = np.maximum(minimo_dia - maior_dia, 0)
-        sobra = np.maximum(menor_dia - maximo_dia, 0)
-        fora_da_faixa = falta + sobra
-        mais_perto_da_faixa = np.nonzero(fora_da_faixa == fora_da_faixa.min())[0]
-        escolha[tipo] = mais_perto_da_faixa[np.argmin(carbo[tipo][mais_perto_da_faixa])]
-        acumulado += kcal[tipo][escolha[tipo]]
-
-    plano = habito(perfil, cardapio)
-    for j, (_, tipo) in enumerate(REFEICOES_PLANO):
-        plano.prato_no_tipo[0, j] = escolha[tipo]
-    return plano
+    """Enumera todo café x almoço x jantar e repete em D7 a D9 o dia de menos carbo que respeita
+    kcal e proteína. Se nenhum dia respeita, fica o de menor penalidade e, no empate, o de menos
+    carbo. Horários são os do hábito e a caminhada é zero, para a comparação medir só os pratos."""
+    quantos = [len(pratos_do_tipo(cardapio, tipo)) for tipo in TIPOS_REFEICAO]
+    dias = np.array(list(itertools.product(*map(range, quantos))))
+    planos = habito(perfil, cardapio)[np.zeros(len(dias), dtype=int)]
+    planos.prato_no_tipo = np.tile(dias, len(DIAS_PLANO))
+    penalidade = penalidade_kcal(planos, perfil, cardapio) + penalidade_proteina(
+        planos, perfil, cardapio
+    )
+    carbo = total_por_dia(planos, cardapio, "carbo").sum(axis=1)
+    return planos[np.lexsort((carbo, penalidade))[0]]

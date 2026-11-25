@@ -144,47 +144,102 @@ def test_busca_aleatoria_usa_exatamente_o_orcamento_do_ag():
         assert refeita[0] == pytest.approx(resultado.aptidao)
 
 
-CARDAPIO_GULOSO = {
-    "cafe": [prato(10, 5, 2, 1) | {"kcal": 100.0}, prato(30, 20, 8, 3) | {"kcal": 400.0}],
-    "almoco": [prato(20, 10, 4, 2) | {"kcal": 200.0}, prato(60, 30, 15, 5) | {"kcal": 600.0}],
-    "jantar": [prato(15, 8, 3, 1) | {"kcal": 150.0}, prato(50, 25, 12, 4) | {"kcal": 500.0}],
-}
+def cardapio_por_kcal(pratos_por_tipo: dict[str, list[tuple[float, float, float]]]):
+    """Cada prato é (kcal, carbo, proteina)."""
+    return montar_cardapio(
+        {
+            tipo: [
+                {"carbo": c, "proteina": p, "gordura": k / 100, "fibra": c / 10, "kcal": k}
+                for k, c, p in pratos
+            ]
+            for tipo, pratos in pratos_por_tipo.items()
+        }
+    )
 
 
-def perfil_guloso(kcal_dia: float) -> pd.Series:
+def perfil_por_kcal(kcal_dia: float, proteina_dia: float = 30.0) -> pd.Series:
     habito = {tipo: {m: 1.0 for m in MACROS} for tipo in TIPOS_REFEICAO}
-    return montar_perfil(kcal_dia=kcal_dia, proteina_dia=30.0, habito_por_tipo=habito)
+    return montar_perfil(kcal_dia=kcal_dia, proteina_dia=proteina_dia, habito_por_tipo=habito)
 
 
 def pratos_por_dia(pop: plano.Populacao) -> list[list[int]]:
     return pop.prato_no_tipo.reshape(-1, len(TIPOS_REFEICAO)).tolist()
 
 
-def test_menos_carbo_escolhe_o_prato_de_menos_carbo_que_respeita_as_calorias():
-    cardapio = montar_cardapio(CARDAPIO_GULOSO)
-
-    escolhido = otimizadores.menos_carbo(perfil_guloso(kcal_dia=1000.0), cardapio)
-
-    # Faixa de 800 a 1200 kcal. Pegar o prato de menos carbo em todas as refeições daria
-    # 100 + 200 + 150 = 450 kcal. No jantar só o prato de 500 kcal fecha o dia dentro da faixa.
-    assert pratos_por_dia(escolhido) == [[0, 0, 1]] * 3
-    kcal_dias = ag.total_por_dia(escolhido, cardapio, "kcal")[0]
-    assert kcal_dias.tolist() == [800.0] * 3
-
-
-def test_menos_carbo_sem_prato_que_caiba_fica_o_mais_perto_da_faixa():
-    escolhido = otimizadores.menos_carbo(
-        perfil_guloso(kcal_dia=3000.0), montar_cardapio(CARDAPIO_GULOSO)
+def test_menos_carbo_fica_na_faixa_quando_uma_combinacao_cabe():
+    # Faixa de 800 a 1200 kcal. O único dia que cabe é 800 + 100 + 100. Começar pelo café de
+    # 500 kcal, que tem menos carbo, deixa o dia em 700 ou 1600.
+    cardapio = cardapio_por_kcal(
+        {
+            "cafe": [(500, 10, 20), (800, 20, 25)],
+            "almoco": [(100, 5, 30)],
+            "jantar": [(100, 5, 20), (1000, 50, 25)],
+        }
     )
 
-    assert pratos_por_dia(escolhido) == [[1, 1, 1]] * 3
+    escolhido = otimizadores.menos_carbo(perfil_por_kcal(kcal_dia=1000.0), cardapio)
+
+    assert pratos_por_dia(escolhido) == [[1, 0, 0]] * 3
+    assert ag.total_por_dia(escolhido, cardapio, "kcal")[0].tolist() == [1000.0] * 3
 
 
-def test_menos_carbo_mantem_horario_e_caminhada_do_habito():
+def test_menos_carbo_minimiza_o_carbo_do_dia_e_nao_o_de_cada_refeicao():
+    # Faixa de 800 a 1200 kcal. Os dias que cabem e o carbo de cada um:
+    # café 0, almoço 0, jantar 1: 800 kcal, 90 g    café 1, almoço 0, jantar 0: 800 kcal, 25 g
+    # café 0, almoço 1, jantar 0: 800 kcal, 75 g    café 1, almoço 0, jantar 1: 1100 kcal, 95 g
+    # café 0, almoço 1, jantar 1: 1100 kcal, 145 g  café 1, almoço 1, jantar 0: 1100 kcal, 80 g
+    # O café de 5 g obriga um almoço ou jantar caro. O dia de menos carbo começa pelo de 10 g.
+    cardapio = cardapio_por_kcal(
+        {
+            "cafe": [(100, 5, 20), (400, 10, 25)],
+            "almoco": [(100, 5, 30), (400, 60, 25)],
+            "jantar": [(300, 10, 20), (600, 80, 25)],
+        }
+    )
+
+    escolhido = otimizadores.menos_carbo(perfil_por_kcal(kcal_dia=1000.0), cardapio)
+
+    assert pratos_por_dia(escolhido) == [[1, 0, 0]] * 3
+    assert ag.total_por_dia(escolhido, cardapio, "carbo")[0].tolist() == [25.0] * 3
+
+
+def test_menos_carbo_respeita_a_proteina_minima():
+    # Os dois cafés têm as mesmas kcal. O de menos carbo deixa o dia com 25 g de proteína,
+    # abaixo dos 80% de 60 g.
+    cardapio = cardapio_por_kcal(
+        {
+            "cafe": [(300, 10, 5), (300, 20, 40)],
+            "almoco": [(400, 30, 10)],
+            "jantar": [(300, 20, 10)],
+        }
+    )
+
+    escolhido = otimizadores.menos_carbo(perfil_por_kcal(1000.0, proteina_dia=60.0), cardapio)
+
+    assert pratos_por_dia(escolhido) == [[1, 0, 0]] * 3
+
+
+def test_menos_carbo_sem_dia_que_caiba_fica_o_de_menor_penalidade_e_menos_carbo():
+    # Faixa de 2400 a 3600 kcal e o maior dia tem 1500. Os cafés 0 e 1 deixam o dia igualmente
+    # longe da faixa, e o 1 tem menos carbo.
+    cardapio = cardapio_por_kcal(
+        {
+            "cafe": [(400, 30, 20), (400, 20, 25), (100, 5, 30)],
+            "almoco": [(600, 60, 20), (200, 20, 25)],
+            "jantar": [(500, 50, 20)],
+        }
+    )
+
+    escolhido = otimizadores.menos_carbo(perfil_por_kcal(kcal_dia=3000.0), cardapio)
+
+    assert pratos_por_dia(escolhido) == [[1, 0, 0]] * 3
+
+
+def test_menos_carbo_mantem_o_horario_do_habito_e_nao_caminha():
     dados = dados_sinteticos(3, semente=5)
     for _, perfil in dados["perfis"].iterrows():
         escolhido = otimizadores.menos_carbo(perfil, dados["cardapio"])
         habito = otimizadores.habito(perfil, dados["cardapio"])
 
         assert escolhido.intervalo.tolist() == habito.intervalo.tolist()
-        assert escolhido.caminhada.tolist() == habito.caminhada.tolist()
+        assert (escolhido.caminhada == 0).all()
