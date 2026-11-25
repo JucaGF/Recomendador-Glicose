@@ -140,8 +140,8 @@ def test_busca_aleatoria_usa_exatamente_o_orcamento_do_ag():
 
         assert sum(linhas_simuladas) == n_avaliacoes * plano.N_REFEICOES
         assert resultado.avaliacoes == n_avaliacoes
-        refeita = ag.fitness(resultado.melhor, ag.simulador_falso, perfil, cardapio, ag.Lambdas())
-        assert refeita[0] == pytest.approx(resultado.fitness)
+        refeita = ag.aptidao(resultado.melhor, ag.simulador_falso, perfil, cardapio, ag.Lambdas())
+        assert refeita[0] == pytest.approx(resultado.aptidao)
 
 
 CARDAPIO_GULOSO = {
@@ -157,7 +157,7 @@ def perfil_guloso(kcal_dia: float) -> pd.Series:
 
 
 def pratos_por_dia(pop: plano.Populacao) -> list[list[int]]:
-    return pop.prato.reshape(-1, len(TIPOS_REFEICAO)).tolist()
+    return pop.prato_no_tipo.reshape(-1, len(TIPOS_REFEICAO)).tolist()
 
 
 def test_menos_carbo_escolhe_o_prato_de_menos_carbo_que_respeita_as_calorias():

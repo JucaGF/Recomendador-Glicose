@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from glicose.ag import FAIXA_KCAL, Lambdas, Resultado, Simulador, fitness
+from glicose.ag import FAIXA_KCAL, Lambdas, Resultado, Simulador, aptidao
 from glicose.esquema import TIPOS_REFEICAO
 from glicose.plano import REFEICOES_PLANO, Populacao, aleatoria, habito, pratos_do_tipo
 
@@ -14,19 +14,19 @@ def busca_aleatoria(
     n_avaliacoes: int, simular: Simulador, perfil, cardapio, lambdas: Lambdas, semente: int
 ) -> Resultado:
     rng = np.random.default_rng(semente)
-    melhor, melhor_fitness = None, np.inf
+    melhor, melhor_aptidao = None, np.inf
     historico = []
     avaliados = 0
     while avaliados < n_avaliacoes:
         lote = aleatoria(min(TAMANHO_LOTE, n_avaliacoes - avaliados), cardapio, rng)
-        aptidao = fitness(lote, simular, perfil, cardapio, lambdas)
+        notas = aptidao(lote, simular, perfil, cardapio, lambdas)
         avaliados += len(lote)
-        if aptidao.min() < melhor_fitness:
-            melhor, melhor_fitness = lote[np.argmin(aptidao)], float(aptidao.min())
-        historico.append((avaliados, melhor_fitness))
+        if notas.min() < melhor_aptidao:
+            melhor, melhor_aptidao = lote[np.argmin(notas)], float(notas.min())
+        historico.append((avaliados, melhor_aptidao))
     return Resultado(
         melhor=melhor,
-        fitness=melhor_fitness,
+        aptidao=melhor_aptidao,
         historico=pd.DataFrame(historico, columns=["avaliacoes", "melhor"]),
         avaliacoes=avaliados,
     )
@@ -53,5 +53,5 @@ def menos_carbo(perfil: pd.Series, cardapio: pd.DataFrame) -> Populacao:
 
     plano = habito(perfil, cardapio)
     for j, (_, tipo) in enumerate(REFEICOES_PLANO):
-        plano.prato[0, j] = escolha[tipo]
+        plano.prato_no_tipo[0, j] = escolha[tipo]
     return plano
