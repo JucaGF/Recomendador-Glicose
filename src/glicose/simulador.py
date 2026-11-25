@@ -48,6 +48,7 @@ DIAS_ESTUDO = (*DIAS_HABITO, *DIAS_PLANO)
 CONJUNTOS = {"d7_d9": DIAS_PLANO, "d1_d6": DIAS_HABITO}
 N_FOLDS = 5
 SEMENTE = 0
+SEMENTES = (0, 1, 2)
 FRACAO_VALIDACAO = 0.2
 IAUC_MINIMA = 0.0
 
@@ -76,6 +77,7 @@ ALVOS = {
     "iauc": Alvo(ida=np.asarray, volta=np.asarray),
     "log1p": Alvo(ida=np.log1p, volta=np.expm1),
 }
+MODELOS = (*(f"rede_{alvo}" for alvo in ALVOS), *BASELINES)
 
 
 def montar_atributos(refeicoes: pd.DataFrame, perfis: pd.DataFrame) -> pd.DataFrame:
@@ -89,8 +91,10 @@ def montar_atributos(refeicoes: pd.DataFrame, perfis: pd.DataFrame) -> pd.DataFr
             **{f"tipo_{tipo}": (refeicoes["tipo"] == tipo).to_numpy() for tipo in TIPOS_REFEICAO},
         },
         index=refeicoes.index,
-    )
-    return atributos.astype("float64")
+    ).astype("float64")
+    # A fibra faz parte do carbo total. Acima dele o registro está errado e vira valor ausente.
+    atributos["fibra"] = atributos["fibra"].where(atributos["fibra"] <= atributos["carbo"])
+    return atributos
 
 
 def construir_modelo(
@@ -113,13 +117,14 @@ class Simulador:
     preparo: Pipeline
     escala_alvo: StandardScaler
     alvo: str
+    iauc_maxima: float
 
     def entradas(self, atributos: pd.DataFrame) -> np.ndarray:
-        return self.preparo.transform(atributos[list(ATRIBUTOS)]).astype("float32")
+        return self.preparo.transform(atributos).astype("float32")
 
     def para_iauc(self, saida: np.ndarray) -> np.ndarray:
         escalado = self.escala_alvo.inverse_transform(np.asarray(saida).reshape(-1, 1))
-        return np.maximum(ALVOS[self.alvo].volta(escalado.ravel()), IAUC_MINIMA)
+        return np.clip(ALVOS[self.alvo].volta(escalado.ravel()), IAUC_MINIMA, self.iauc_maxima)
 
     def prever_atributos(self, atributos: pd.DataFrame) -> np.ndarray:
         return self.para_iauc(self.modelo.predict_on_batch(self.entradas(atributos)))
@@ -138,7 +143,7 @@ def treinar(
 ) -> tuple[Simulador, keras.callbacks.History]:
     keras.utils.set_random_seed(semente)
     preparo = make_pipeline(SimpleImputer(strategy="median"), StandardScaler())
-    preparo.fit(treino.atributos[list(ATRIBUTOS)])
+    preparo.fit(treino.atributos)
     alvo_transformado = ALVOS[alvo].ida(treino.iauc).reshape(-1, 1)
     escala_alvo = StandardScaler().fit(alvo_transformado)
     modelo = construir_modelo(
@@ -148,7 +153,7 @@ def treinar(
         config.taxa_aprendizado,
         config.dropout,
     )
-    simulador = Simulador(modelo, preparo, escala_alvo, alvo)
+    simulador = Simulador(modelo, preparo, escala_alvo, alvo, float(treino.iauc.max()))
     x = simulador.entradas(treino.atributos)
     y = escala_alvo.transform(alvo_transformado)
     ajuste, validacao = separar_validacao(treino, semente)
@@ -204,35 +209,27 @@ def validar(
     return pd.concat(partes, ignore_index=True)
 
 
-def modelos_avaliados(previsoes: pd.DataFrame) -> list[str]:
-    return [nome for nome in (*(f"rede_{alvo}" for alvo in ALVOS), *BASELINES) if nome in previsoes]
-
-
-def mae(real: pd.Series, previsto: pd.Series) -> float:
-    return float(np.mean(np.abs(real - previsto)))
-
-
-def pearson(real: pd.Series, previsto: pd.Series) -> float:
-    return float(np.corrcoef(real, previsto)[0, 1])
-
-
 def resumir(previsoes: pd.DataFrame) -> pd.DataFrame:
     linhas = {}
-    for nome in modelos_avaliados(previsoes):
+    for nome in MODELOS:
         linha = {}
         for conjunto, dias in CONJUNTOS.items():
             parte = previsoes[previsoes["dia"].isin(dias)]
-            linha[f"mae_{conjunto}"] = mae(parte[ALVO], parte[nome])
-            mae_folds = parte.groupby("fold").apply(lambda f, n=nome: mae(f[ALVO], f[n]))
-            linha[f"desvio_folds_{conjunto}"] = float(mae_folds.std())
-            linha[f"pearson_{conjunto}"] = pearson(parte[ALVO], parte[nome])
+            erro = (parte[ALVO] - parte[nome]).abs()
+            linha[f"mae_{conjunto}"] = erro.mean()
+            linha[f"desvio_folds_{conjunto}"] = erro.groupby(parte["fold"]).mean().std()
+            linha[f"pearson_{conjunto}"] = parte[ALVO].corr(parte[nome])
         linhas[nome] = linha
     return pd.DataFrame.from_dict(linhas, orient="index")
 
 
 def mae_por(previsoes: pd.DataFrame, modelo: str, coluna: str) -> pd.Series:
     plano = previsoes[previsoes["dia"].isin(DIAS_PLANO)]
-    return plano.groupby(coluna).apply(lambda parte: mae(parte[ALVO], parte[modelo]))
+    return (plano[ALVO] - plano[modelo]).abs().groupby(plano[coluna]).mean()
+
+
+def media_das_sementes(partes: list) -> pd.DataFrame | pd.Series:
+    return pd.concat(partes).groupby(level=0, sort=False).mean()
 
 
 def escolher_alvo(tabela: pd.DataFrame) -> str:
@@ -267,6 +264,7 @@ def salvar(simulador: Simulador, pasta: Path = ARTEFATOS) -> None:
         "preparo": simulador.preparo,
         "escala_alvo": simulador.escala_alvo,
         "alvo": simulador.alvo,
+        "iauc_maxima": simulador.iauc_maxima,
     }
     joblib.dump(preparo, pasta / ARQUIVO_PREPARO)
 
@@ -280,22 +278,23 @@ def main() -> None:
     refeicoes = pd.read_parquet(ARTEFATOS / "refeicoes.parquet")
     perfis = pd.read_parquet(ARTEFATOS / "perfis.parquet")
 
-    previsoes = validar(refeicoes, perfis)
-    tabela = resumir(previsoes)
+    validacoes = [validar(refeicoes, perfis, semente=semente) for semente in SEMENTES]
+    tabela = media_das_sementes([resumir(previsoes) for previsoes in validacoes])
     alvo = escolher_alvo(tabela)
-    print(f"GroupKFold({N_FOLDS}) por participante, iAUC em mg/dL·min")
+    print(f"GroupKFold({N_FOLDS}) por participante, média de {len(SEMENTES)} sementes")
+    print("MAE em mg/dL·min")
     print(tabela.to_string(float_format="%.2f"))
     print(f"\nalvo escolhido: {alvo}")
     for coluna in ("tipo", "grupo"):
         print(f"\nMAE D7 a D9 da rede_{alvo} por {coluna}")
-        print(mae_por(previsoes, f"rede_{alvo}", coluna).round(1).to_string())
+        mae_coluna = [mae_por(previsoes, f"rede_{alvo}", coluna) for previsoes in validacoes]
+        print(media_das_sementes(mae_coluna).round(1).to_string())
 
     simulador = treinar_final(refeicoes, perfis, alvo)
     salvar(simulador)
     teste = teste_d7_d9(simulador, refeicoes, perfis)
-    print(
-        f"\ntreino com D1 a D6 de todos, MAE em D7 a D9: {mae(teste[ALVO], teste['previsto']):.1f}"
-    )
+    mae_teste = (teste[ALVO] - teste["previsto"]).abs().mean()
+    print(f"\nmodelo final, MAE nas refeições de D7 a D9 dos mesmos participantes: {mae_teste:.1f}")
     print(f"gravado em {ARTEFATOS / ARQUIVO_MODELO} e {ARTEFATOS / ARQUIVO_PREPARO}")
 
 
