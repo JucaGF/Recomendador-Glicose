@@ -8,15 +8,16 @@ from glicose.esquema import DIAS, REFEICOES, conformar
 
 ARTEFATOS = Path("artefatos")
 # 2 horas é a janela da iAUC no método do índice glicêmico (ISO 26642).
-JANELA = pd.Timedelta(minutes=120)
+MINUTOS_JANELA = 120
+JANELA = pd.Timedelta(minutes=MINUTOS_JANELA)
 # A atividade conta na primeira hora, enquanto a glicose ainda sobe. O pico mediano vem aos 67
 # minutos.
 JANELA_ATIVIDADE = pd.Timedelta(minutes=60)
 # Com 90% da janela coberta, falta no máximo 12 minutos, menos de 3 leituras do Dexcom.
 COBERTURA_MINIMA_JANELA = 0.9
-# O Dexcom lê a cada 5 minutos. Uma base com mais de 20 minutos vem de antes de uma falha do
-# sensor, e não da glicose no momento da refeição.
-IDADE_MAXIMA_BASE = pd.Timedelta(minutes=20)
+# O Dexcom lê a cada 5 minutos. Uma leitura a mais de 20 minutos da borda da janela vem do outro
+# lado de uma falha do sensor, e não da glicose naquele momento.
+DISTANCIA_MAXIMA_DA_BORDA = pd.Timedelta(minutes=20)
 # 3 METs é o limite de atividade moderada da OMS. Os 11 participantes que só têm Intensity
 # ficam sem atividade, porque a escala do Intensity não se compara com METs.
 METS_ATIVO = 3
@@ -55,21 +56,32 @@ def janela_limpa(instantes_refeicoes: pd.DatetimeIndex, inicio: pd.Timestamp) ->
 
 
 def resposta(nativas: pd.Series, grade: pd.Series, inicio: pd.Timestamp) -> dict | None:
-    janela = slice(inicio, inicio + JANELA)
-    cobertura = grade[janela].notna().sum() / (JANELA // pd.Timedelta(minutes=1) + 1)
-    anteriores = nativas[:inicio]
-    if cobertura < COBERTURA_MINIMA_JANELA or anteriores.empty:
+    fim = inicio + JANELA
+    cobertura = grade[inicio:fim].notna().mean()
+    antes = nativas[:inicio]
+    depois = nativas[fim:]
+    if cobertura < COBERTURA_MINIMA_JANELA or antes.empty or depois.empty:
         return None
-    if inicio - anteriores.index[-1] > IDADE_MAXIMA_BASE:
+    ultima_antes, primeira_depois = antes.index[-1], depois.index[0]
+    if inicio - ultima_antes > DISTANCIA_MAXIMA_DA_BORDA:
         return None
-    base = anteriores.iloc[-1]
-    curva = nativas[janela]
-    minutos = (curva.index - inicio) / pd.Timedelta(minutes=1)
-    return {
-        "base": base,
-        "iauc": calcular_iauc(minutos, curva.to_numpy(), base),
-        "pico": curva.max(),
-    }
+    if primeira_depois - fim > DISTANCIA_MAXIMA_DA_BORDA:
+        return None
+    base = antes.iloc[-1]
+    minutos, glicose = curva_de_2_horas(nativas[ultima_antes:primeira_depois], inicio, base)
+    return {"base": base, "iauc": calcular_iauc(minutos, glicose, base), "pico": glicose.max()}
+
+
+def curva_de_2_horas(
+    leituras: pd.Series, inicio: pd.Timestamp, base: float
+) -> tuple[np.ndarray, np.ndarray]:
+    minutos = ((leituras.index - inicio) / pd.Timedelta(minutes=1)).to_numpy()
+    glicose = leituras.to_numpy()
+    dentro = (minutos > 0) & (minutos < MINUTOS_JANELA)
+    glicose_no_fim = np.interp(MINUTOS_JANELA, minutos, glicose)
+    minutos_da_curva = np.concatenate([[0], minutos[dentro], [MINUTOS_JANELA]])
+    glicose_da_curva = np.concatenate([[base], glicose[dentro], [glicose_no_fim]])
+    return minutos_da_curva, glicose_da_curva
 
 
 def minutos_ativos(tabela: pd.DataFrame, inicio: pd.Timestamp) -> float:
