@@ -4,9 +4,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from glicose import ag, plano, recomendar
+from glicose import ag, experimentos, plano, recomendar
 from glicose.ag import ConfigAG, Lambdas
-from glicose.esquema import DIAS_PLANO, MACROS, dados_sinteticos
+from glicose.esquema import DIAS_PLANO, MACROS, TIPOS_REFEICAO, dados_sinteticos
 from glicose.simulador import ConfigRede, treinar_final
 
 N_PARTICIPANTES = 6
@@ -88,3 +88,41 @@ def test_todos_os_pratos_do_plano_existem_no_cardapio(sinteticos, recomendado):
         prato = cardapio.loc[refeicao["prato"]]
         assert prato["tipo"] == refeicao["tipo"]
         assert [prato[m] for m in MACROS] == [refeicao[m] for m in MACROS]
+
+
+def test_d9_real_entra_com_a_glicose_de_jejum_e_so_quando_esta_completo(sinteticos):
+    perfil = sinteticos["perfis"].iloc[0]
+    refeicoes, dias = sinteticos["refeicoes"], sinteticos["dias"]
+    da_pessoa_em_d9 = (refeicoes["participante"] == perfil["participante"]) & (
+        refeicoes["dia"] == experimentos.DIA_ALVO
+    )
+
+    def devolve_glicose_pre(entrada):
+        return entrada["glicose_pre"].to_numpy()
+
+    real = experimentos.comportamento_real(perfil, refeicoes, dias, devolve_glicose_pre)
+    sem_jantar = refeicoes[~(da_pessoa_em_d9 & (refeicoes["tipo"] == "jantar"))]
+    sem_relogio = refeicoes.assign(
+        minutos_ativos_60=refeicoes["minutos_ativos_60"].mask(da_pessoa_em_d9)
+    )
+
+    assert len(real) == len(TIPOS_REFEICAO)
+    assert (real["iauc"] == perfil["glicose_jejum_cgm"]).all()
+    assert real["iauc_d9"].iloc[0] == pytest.approx(
+        len(TIPOS_REFEICAO) * perfil["glicose_jejum_cgm"]
+    )
+    assert experimentos.comportamento_real(perfil, sem_jantar, dias, devolve_glicose_pre) is None
+    assert experimentos.comportamento_real(perfil, sem_relogio, dias, devolve_glicose_pre) is None
+    quarta_refeicao_suja = dias.assign(
+        n_refeicoes=dias["n_refeicoes"].mask(
+            (dias["participante"] == perfil["participante"])
+            & (dias["dia"] == experimentos.DIA_ALVO),
+            REFEICOES_COM_UMA_SUJA,
+        )
+    )
+    assert (
+        experimentos.comportamento_real(
+            perfil, refeicoes, quarta_refeicao_suja, devolve_glicose_pre
+        )
+        is None
+    )
