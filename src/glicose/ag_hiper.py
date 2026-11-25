@@ -356,7 +356,7 @@ def melhor_por_treinos(configuracoes: pd.DataFrame) -> pd.Series:
     )
 
 
-def desenhar_comparacao(treinos: pd.DataFrame, mae_padrao: float, caminho: Path) -> None:
+def desenhar_comparacao(treinos: pd.DataFrame, escolhidas: pd.DataFrame, caminho: Path) -> None:
     figura = Figure(figsize=(7, 5))
     eixo = figura.subplots()
     configuracoes = por_configuracao(treinos)
@@ -367,11 +367,25 @@ def desenhar_comparacao(treinos: pd.DataFrame, mae_padrao: float, caminho: Path)
             curva = melhor_por_treinos(da_busca(configuracoes, busca, semente))
             rotulo_curva = legenda if i == 0 else None
             eixo.step(curva.index, curva.to_numpy(), where="post", color=cor, label=rotulo_curva)
-    eixo.axhline(mae_padrao, linestyle="--", color="gray", label="configuração padrão de P3")
+    no_teste = escolhidas.groupby("busca", sort=False)["mae_teste"].mean()
+    media = f", média de {len(sementes)} sementes" if len(sementes) > 1 else ""
+    padrao = escolhidas.set_index("busca").loc["padrao", "mae"]
+    eixo.axhline(padrao, linestyle="--", color="gray", label="configuração padrão de P3")
+    rotulos = {"genetica": "AG", "aleatoria": "busca aleatória", "padrao": "padrão de P3"}
+    resumo = [f"{rotulo}: {no_teste[busca]:.0f}" for busca, rotulo in rotulos.items()]
+    eixo.text(
+        0.98,
+        0.55,
+        "\n".join([f"MAE das melhores no teste final{media}", *resumo]),
+        transform=eixo.transAxes,
+        ha="right",
+        va="top",
+        bbox={"facecolor": "white", "edgecolor": "gray"},
+    )
     eixo.set_xlabel("treinos feitos")
     eixo.set_ylabel(f"melhor MAE em D7 a D9, GroupKFold({N_FOLDS_BUSCA}) do ajuste (mg/dL·min)")
     eixo.set_title("Melhor MAE contra treinos: AG e busca aleatória")
-    eixo.legend()
+    eixo.legend(loc="upper right", bbox_to_anchor=(1, 0.93))
     caminho.parent.mkdir(parents=True, exist_ok=True)
     figura.savefig(caminho, dpi=120, bbox_inches="tight")
 
@@ -449,7 +463,7 @@ def main() -> None:
     treinos.to_parquet(ARTEFATOS / ARQUIVO_TREINOS)
     populacoes.to_parquet(ARTEFATOS / ARQUIVO_POPULACOES)
     escolhidas.to_parquet(ARTEFATOS / ARQUIVO_TESTE_FINAL)
-    desenhar_comparacao(treinos, mae_padrao, ARTEFATOS / ARQUIVO_FIGURA)
+    desenhar_comparacao(treinos, escolhidas, ARTEFATOS / ARQUIVO_FIGURA)
     print(f"gravado em {ARTEFATOS / ARQUIVO_FIGURA}")
 
 
