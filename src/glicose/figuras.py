@@ -42,6 +42,8 @@ TRANSPARENCIA_DESVIO = 0.2
 TAMANHO_PONTO_FRENTE = 4
 TAMANHO_MARCADOR = 11
 CINZA_REFERENCIA = "0.5"
+ROTACAO_ROTULOS = 20
+LARGURA_FIGURA_MUDANCA = 6.5
 
 PALETA = ("#257de0", "#f47230", "#00b894", "#f2a600", "#ee7fac", "#008a17", "#6a4ce2", "#8c564b")
 COR_ESTRATEGIA = dict(zip(ESTRATEGIAS, PALETA, strict=True))
@@ -168,13 +170,14 @@ def distancia_do_otimo(resultados: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def mudanca_por_dia(resultados: pd.DataFrame) -> pd.DataFrame:
+def mudanca_por_dia(resultados: pd.DataFrame, estrategias=("ag", "otimo")) -> pd.DataFrame:
     chave = ["participante", "dia", "tipo"]
     habito = resultados.loc[resultados["estrategia"] == "habito", [*chave, "prato"]]
-    ag = resultados[resultados["estrategia"] == "ag"]
-    juntos = ag.merge(habito, on=chave, suffixes=("", "_habito"))
+    outras = resultados[resultados["estrategia"].isin(estrategias)]
+    juntos = outras.merge(habito, on=chave, suffixes=("", "_habito"))
     juntos = juntos.assign(prato_trocado=juntos["prato"] != juntos["prato_habito"])
-    return media_por_pessoa(juntos, ["prato_trocado"], ["dia"])
+    trocados = media_por_pessoa(juntos, ["prato_trocado"], ["dia", "estrategia"])
+    return trocados["prato_trocado"].unstack("estrategia")[list(estrategias)]
 
 
 def real_previsto_e_medido(resultados: pd.DataFrame) -> pd.Series:
@@ -369,11 +372,12 @@ def figura_macros(macros: pd.DataFrame) -> Figure:
         barras_agrupadas(eixo, valores, COR_ESTRATEGIA, NOMES_ESTRATEGIA)
         eixo.set_title(NOMES_MACRO[macro])
         eixo.set_ylabel("gramas em D9 (média por pessoa)")
-    eixos[0].legend()
+    alcas, rotulos = eixos[0].get_legend_handles_labels()
+    figura.legend(alcas, rotulos, loc="outside lower center", ncols=len(rotulos))
     figura.suptitle(
         "Macros de D9 por estratégia. O simulador nunca prevê menos glicose com mais carbo, e a "
-        "faixa de kcal\nobriga a trocar o carbo por proteína e gordura, então o menos carbo e a "
-        "busca aleatória chegam perto do AG sem buscar isso"
+        "faixa de kcal\nobriga a trocar o carbo por proteína e gordura. A busca aleatória, que "
+        "não mira nenhum macro, chega aos mesmos macros do AG"
     )
     return figura
 
@@ -392,7 +396,7 @@ def figura_caminhada(resultados: pd.DataFrame, piso: pd.DataFrame) -> Figure:
         "Caminhada depois de cada refeição de D9 no plano do AG\n"
         "o simulador nunca prevê mais glicose com mais caminhada, então o AG vai ao limite"
     )
-    por_tipo.legend()
+    por_tipo.legend(loc="lower center")
 
     piso = piso.dropna(how="all")
     piso.index = [NOMES_ESTRATEGIA[e] for e in piso.index]
@@ -403,21 +407,24 @@ def figura_caminhada(resultados: pd.DataFrame, piso: pd.DataFrame) -> Figure:
         "Refeições de D9 com iAUC prevista igual a 0, o piso do simulador\n"
         "nelas o prato e a caminhada não mudam mais a previsão"
     )
+    no_piso_do_simulador.tick_params(axis="x", labelrotation=ROTACAO_ROTULOS)
     no_piso_do_simulador.legend()
     return figura
 
 
 def figura_mudanca(mudanca: pd.DataFrame) -> Figure:
-    figura = Figure(figsize=(POLEGADAS_POR_PAINEL, ALTURA_FIGURA), layout="constrained")
+    figura = Figure(figsize=(LARGURA_FIGURA_MUDANCA, ALTURA_FIGURA), layout="constrained")
     eixo = figura.subplots()
-    eixo.bar([f"D{d}" for d in mudanca.index], mudanca["prato_trocado"], color=COR_ESTRATEGIA["ag"])
+    mudanca.index = [f"D{d}" for d in mudanca.index]
+    barras_agrupadas(eixo, mudanca, COR_ESTRATEGIA, NOMES_ESTRATEGIA)
     eixo.set_ylim(0, 1)
     eixo.set_ylabel("fração de pratos trocados (média por pessoa)")
     eixo.set_xlabel("dia do plano")
     eixo.set_title(
-        "Pratos do AG diferentes do hábito\n"
-        "em D7 e D8 só a faixa e a distância\ndo hábito entram na aptidão"
+        "Pratos diferentes do hábito em cada dia\n"
+        "em D7 e D8 o ótimo quase sempre fica no hábito,\ne o AG troca por ruído da busca"
     )
+    eixo.legend()
     return figura
 
 
