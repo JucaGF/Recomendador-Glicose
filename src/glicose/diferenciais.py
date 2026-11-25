@@ -425,6 +425,10 @@ def efeito_do_horario(participantes: list[int]) -> pd.DataFrame:
     return pd.concat(linhas, ignore_index=True)
 
 
+def cai_ou_fica_acima(ganho: float) -> str:
+    return f"cai {ganho:.0f}" if ganho >= 0 else f"fica {-ganho:.0f} acima"
+
+
 def analisar_horario_livre(planos_d9: pd.DataFrame) -> str:
     variantes = ["com_travas", "ag_horario_fixo", "horario_livre"]
     d9 = planos_d9[planos_d9["variante"].isin(variantes)]
@@ -467,10 +471,11 @@ def analisar_horario_livre(planos_d9: pd.DataFrame) -> str:
     return (
         f"horário livre: o AG move as refeições de D9 em mediana "
         f"{deslocamento.abs().median():.1f} h (máximo {deslocamento.abs().max():.1f} h) e a "
-        f"iAUC prevista cai em mediana {ganho.median():.0f} mg/dL·min "
+        f"iAUC prevista {cai_ou_fica_acima(ganho.median())} mg/dL·min em mediana "
         f"({(ganho / por_plano['ag_horario_fixo']).median():.0%}) frente ao mesmo AG no horário "
         f"do hábito, em {len(por_plano)} planos; frente ao ótimo exato no horário do hábito "
-        f"cai {ganho_sobre_otimo.median():.0f} e vence em {ganho_sobre_otimo.gt(0).mean():.0%}"
+        f"{cai_ou_fica_acima(ganho_sobre_otimo.median())} e vence em "
+        f"{ganho_sobre_otimo.gt(0).mean():.0%}"
     )
 
 
