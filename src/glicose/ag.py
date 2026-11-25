@@ -22,7 +22,8 @@ from glicose.plano import (
 )
 
 # Recebe uma tabela no formato ENTRADA_SIMULADOR e devolve um valor por linha, na mesma ordem das
-# linhas. O AG usa a posição da saída para saber de que plano e de que refeição é cada iAUC.
+# linhas. O AG usa a posição da saída para saber de que plano e de que refeição é cada iAUC, então
+# uma saída fora de ordem não é detectada e dá a iAUC ao plano errado.
 Simulador = Callable[[pd.DataFrame], np.ndarray]
 
 POSICOES_D9 = [j for j, (dia, _) in enumerate(REFEICOES_PLANO) if dia == 9]

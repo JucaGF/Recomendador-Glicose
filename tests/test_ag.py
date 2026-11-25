@@ -153,10 +153,10 @@ def test_cantos_dos_limites_decodificam_jantar_ate_23h_e_intervalos_de_3_horas_o
     assert np.diff(por_dia_e_tipo, axis=2).min() >= 3.0
 
 
-def test_penalidade_de_kcal_mantem_d9_perto_do_habito():
+def test_sem_penalidade_d9_tem_o_menor_carbo_e_com_p_kcal_fica_perto_do_habito():
     cardapio, perfil = cardapio_pequeno(), perfil_pequeno()
-    menos_kcal = [
-        int(cardapio.loc[cardapio["tipo"] == tipo, "kcal"].to_numpy().argmin())
+    menos_carbo = [
+        int(cardapio.loc[cardapio["tipo"] == tipo, "carbo"].to_numpy().argmin())
         for tipo in TIPOS_REFEICAO
     ]
 
@@ -176,9 +176,51 @@ def test_penalidade_de_kcal_mantem_d9_perto_do_habito():
             semente,
         )
 
-        assert pratos_d9(sem_penalidade.melhor) == menos_kcal
+        assert pratos_d9(sem_penalidade.melhor) == menos_carbo
         kcal_d9 = ag.total_por_dia(com_penalidade.melhor, cardapio, "kcal")[0, ag.DIA_9]
         assert 0.8 * perfil["kcal_dia"] <= kcal_d9 <= 1.2 * perfil["kcal_dia"]
+
+
+def test_penalidade_de_proteina_soma_o_que_falta_para_80_por_cento_em_cada_dia():
+    cardapio, perfil = cardapio_pequeno(), perfil_pequeno()
+    com_45_g_por_dia = [0] * plano.N_REFEICOES
+    com_100_g_por_dia = [2] * plano.N_REFEICOES
+    com_45_g_so_em_d9 = [2, 2, 2, 2, 2, 2, 0, 0, 0]
+    faltam_3_de_60_g = 0.05
+
+    penalidades = ag.penalidade_proteina(
+        planos(com_45_g_por_dia, com_100_g_por_dia, com_45_g_so_em_d9), perfil, cardapio
+    )
+
+    assert penalidades == pytest.approx([3 * faltam_3_de_60_g, 0.0, faltam_3_de_60_g])
+
+
+def test_distancia_habito_e_a_media_das_9_refeicoes_em_desvios_padrao_do_cardapio():
+    igual_ao_habito = [2] * plano.N_REFEICOES
+    jantar_d9_trocado = [2, 2, 2, 2, 2, 2, 2, 2, 1]
+
+    distancias = ag.distancia_habito(
+        planos(igual_ao_habito, jantar_d9_trocado), perfil_pequeno(), cardapio_pequeno()
+    )
+
+    assert distancias == pytest.approx([0.0, distancia_em_desvios("jantar", 2, 1) / 9])
+
+
+def test_simulador_que_inverte_a_saida_troca_a_iauc_entre_os_planos():
+    cardapio, perfil = cardapio_pequeno(), perfil_pequeno()
+    pouco_carbo, muito_carbo = [0] * plano.N_REFEICOES, [2] * plano.N_REFEICOES
+    pop = planos(pouco_carbo, muito_carbo)
+    iauc_pouco_carbo = 1.5 * (20 + 25 + 20)
+    iauc_muito_carbo = 1.5 * (70 + 90 + 85)
+
+    def simulador_invertido(refeicoes: pd.DataFrame) -> np.ndarray:
+        return ag.simulador_falso(refeicoes)[::-1]
+
+    na_ordem = ag.iauc_d9(pop, ag.simulador_falso, perfil, cardapio)
+    invertida = ag.iauc_d9(pop, simulador_invertido, perfil, cardapio)
+
+    assert na_ordem == pytest.approx([iauc_pouco_carbo, iauc_muito_carbo])
+    assert invertida == pytest.approx([iauc_muito_carbo, iauc_pouco_carbo])
 
 
 def test_para_refeicoes_segue_o_contrato_do_simulador():
