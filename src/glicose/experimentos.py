@@ -206,7 +206,13 @@ def rodar_semente(perfil, tabelas: dict, simular, semente: int, config: ConfigAG
 
     inicio = time.perf_counter()
     aleatoria = otimizadores.busca_aleatoria(
-        resultado_ag.avaliacoes, simular, perfil, cardapio, config.lambdas, semente
+        resultado_ag.avaliacoes,
+        simular,
+        perfil,
+        cardapio,
+        config.lambdas,
+        semente,
+        config.horario_livre,
     )
     segundos_aleatoria = time.perf_counter() - inicio
 

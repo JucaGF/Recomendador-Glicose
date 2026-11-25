@@ -14,6 +14,8 @@ from glicose.esquema import DIAS_PLANO, MACROS, TIPOS_REFEICAO, pasta_dados
 from glicose.plano import (
     N_REFEICOES,
     Populacao,
+    falta_proteina,
+    fora_da_faixa_kcal,
     habito,
     indices_cardapio,
     para_refeicoes,
@@ -50,8 +52,8 @@ def sem_caminhada(planos: Populacao) -> Populacao:
 def dias_fora_da_faixa(
     kcal_por_dia: np.ndarray, proteina_por_dia: np.ndarray, perfil: pd.Series
 ) -> tuple[np.ndarray, np.ndarray]:
-    fora_kcal = np.abs(kcal_por_dia / perfil["kcal_dia"] - 1) > ag.FAIXA_KCAL
-    fora_proteina = proteina_por_dia / perfil["proteina_dia"] < ag.PROTEINA_MINIMA
+    fora_kcal = fora_da_faixa_kcal(kcal_por_dia, perfil) > 0
+    fora_proteina = falta_proteina(proteina_por_dia, perfil) > 0
     return fora_kcal.sum(axis=-1), fora_proteina.sum(axis=-1)
 
 

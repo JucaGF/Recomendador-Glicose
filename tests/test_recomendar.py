@@ -29,9 +29,7 @@ def sinteticos():
 
 @pytest.fixture(scope="module")
 def simulador(sinteticos):
-    return treinar_final(
-        sinteticos["refeicoes"], sinteticos["perfis"], "log1p", ConfigRede(epocas=5)
-    )
+    return treinar_final(sinteticos["refeicoes"], sinteticos["perfis"], ConfigRede(epocas=5))
 
 
 @pytest.fixture(scope="module")
