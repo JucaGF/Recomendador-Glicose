@@ -318,3 +318,50 @@ def test_menos_carbo_mantem_o_horario_do_habito_e_nao_caminha():
 
         assert escolhido.intervalo.tolist() == habito.intervalo.tolist()
         assert (escolhido.caminhada == 0).all()
+
+
+def horarios_por_chamada(otimizador) -> list[np.ndarray]:
+    vistos = []
+
+    def simulador_espiao(refeicoes):
+        vistos.append(refeicoes["horario"].to_numpy().reshape(-1, plano.N_REFEICOES))
+        return ag.simulador_falso(refeicoes)
+
+    otimizador(simulador_espiao)
+    return vistos
+
+
+def rodar_busca_aleatoria(perfil, cardapio, horario_livre):
+    return lambda simular: otimizadores.busca_aleatoria(
+        200, simular, perfil, cardapio, ag.Lambdas(), semente=0, horario_livre=horario_livre
+    )
+
+
+def rodar_nsga2(perfil, cardapio, horario_livre):
+    config = ag.ConfigAG(tamanho_populacao=10, max_geracoes=5, horario_livre=horario_livre)
+    return lambda simular: nsga2.rodar(config, simular, perfil, cardapio, semente=0)
+
+
+@pytest.mark.parametrize("rodar", [rodar_busca_aleatoria, rodar_nsga2])
+def test_sem_horario_livre_todo_plano_avaliado_tem_o_horario_do_habito(rodar):
+    dados = dados_sinteticos(1, semente=6)
+    perfil, cardapio = dados["perfis"].iloc[0], dados["cardapio"]
+    horario_habito = plano.horarios(plano.habito(perfil, cardapio))
+
+    vistos = np.vstack(horarios_por_chamada(rodar(perfil, cardapio, False)))
+
+    np.testing.assert_array_equal(vistos, np.broadcast_to(horario_habito, vistos.shape))
+
+
+@pytest.mark.parametrize("rodar", [rodar_busca_aleatoria, rodar_nsga2])
+def test_com_horario_livre_aparecem_horarios_que_a_primeira_avaliacao_nao_tinha(rodar):
+    dados = dados_sinteticos(1, semente=6)
+    perfil, cardapio = dados["perfis"].iloc[0], dados["cardapio"]
+    cafes = [j for j, (_, tipo) in enumerate(plano.REFEICOES_PLANO) if tipo == "cafe"]
+
+    primeira, *depois = horarios_por_chamada(rodar(perfil, cardapio, True))
+
+    # O horário do café é o próprio gene, e o cruzamento só troca genes de lugar entre planos.
+    # Um horário de café novo depois da população inicial só pode vir da mutação.
+    novos = [np.setdiff1d(np.vstack(depois)[:, j], primeira[:, j]).size for j in cafes]
+    assert sum(novos) > 0

@@ -21,14 +21,24 @@ TAMANHO_LOTE = 100
 
 
 def busca_aleatoria(
-    n_avaliacoes: int, simular: Simulador, perfil, cardapio, lambdas: Lambdas, semente: int
+    n_avaliacoes: int,
+    simular: Simulador,
+    perfil,
+    cardapio,
+    lambdas: Lambdas,
+    semente: int,
+    horario_livre: bool = False,
 ) -> Resultado:
+    """Recebe o mesmo horario_livre do ConfigAG para buscar no mesmo espaço que o AG."""
     rng = np.random.default_rng(semente)
+    intervalo_habito = habito(perfil, cardapio).intervalo
     melhor, melhor_aptidao = None, np.inf
     historico = []
     avaliados = 0
     while avaliados < n_avaliacoes:
         lote = aleatoria(min(TAMANHO_LOTE, n_avaliacoes - avaliados), cardapio, rng)
+        if not horario_livre:
+            lote.intervalo[:] = intervalo_habito
         notas = aptidao(lote, simular, perfil, cardapio, lambdas)
         avaliados += len(lote)
         if notas.min() < melhor_aptidao:

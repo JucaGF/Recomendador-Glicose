@@ -148,7 +148,11 @@ def rodar(config: ConfigAG, simular: Simulador, perfil, cardapio, semente: int) 
             filhos.append(cruzamento(pop[pai], pop[mae], rng))
         filhos = mutacao_prato(Populacao.juntar(*filhos), vizinhos, config.taxa_mutacao_prato, rng)
         filhos = mutacao_gaussiana(
-            filhos, sigma(geracao, config), config.taxa_mutacao_gaussiana, rng
+            filhos,
+            sigma(geracao, config),
+            config.taxa_mutacao_gaussiana,
+            rng,
+            config.horario_livre,
         )
 
         juntos = Populacao.juntar(pop, filhos)
