@@ -30,6 +30,9 @@ DIA_9 = -1
 FAIXA_KCAL = 0.20
 PROTEINA_MINIMA = 0.80
 VIZINHOS_PRATO = 3
+# Com só os vizinhos mais próximos, cerca de 5% dos pratos do cardápio real não são vizinhos de
+# nenhum outro e a mutação nunca chega a eles.
+PROB_SALTO_PRATO = 0.1
 PROB_GENE_DO_PAI = 0.5
 SEMENTE_DADOS = 0
 
@@ -159,8 +162,11 @@ def mutacao_prato(
     novo = pop.copiar()
     sorteados = rng.random(novo.prato_no_tipo.shape) < taxa
     for i, j in zip(*np.nonzero(sorteados), strict=True):
-        tipo = REFEICOES_PLANO[j][1]
-        novo.prato_no_tipo[i, j] = rng.choice(vizinhos[tipo][novo.prato_no_tipo[i, j]])
+        vizinhos_do_tipo = vizinhos[REFEICOES_PLANO[j][1]]
+        if rng.random() < PROB_SALTO_PRATO:
+            novo.prato_no_tipo[i, j] = rng.integers(len(vizinhos_do_tipo))
+        else:
+            novo.prato_no_tipo[i, j] = rng.choice(vizinhos_do_tipo[novo.prato_no_tipo[i, j]])
     return novo
 
 

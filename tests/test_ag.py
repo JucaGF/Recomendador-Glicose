@@ -22,7 +22,7 @@ PRATOS_PEQUENOS = {
 }
 
 
-def cardapio_pequeno() -> pd.DataFrame:
+def cardapio_pequeno(pratos: dict = PRATOS_PEQUENOS) -> pd.DataFrame:
     linhas = [
         {
             "tipo": tipo,
@@ -35,7 +35,7 @@ def cardapio_pequeno() -> pd.DataFrame:
             "participante_origem": 1,
         }
         for tipo in TIPOS_REFEICAO
-        for carbo, proteina, gordura, fibra in PRATOS_PEQUENOS[tipo]
+        for carbo, proteina, gordura, fibra in pratos[tipo]
     ]
     cardapio = pd.DataFrame(linhas)
     cardapio["prato"] = range(len(cardapio))
@@ -234,3 +234,17 @@ def test_ag_termina_com_aptidao_finita_para_perfil_sem_jantar():
 
     assert np.isfinite(resultado.aptidao)
     assert np.isfinite(resultado.historico[["melhor", "media"]].to_numpy()).all()
+
+
+def test_mutacao_de_prato_alcanca_o_prato_que_nao_e_vizinho_de_nenhum_outro():
+    jantares = [(10, 30, 10, 3), (11, 30, 10, 3), (12, 30, 10, 3), (13, 30, 10, 3), (95, 30, 10, 3)]
+    cardapio = cardapio_pequeno(PRATOS_PEQUENOS | {"jantar": jantares})
+    vizinhos = ag.vizinhos_prato(cardapio)
+    isolado = 4
+    assert isolado not in vizinhos["jantar"]
+    todos_no_primeiro_prato = planos(*[[0] * plano.N_REFEICOES] * 200)
+
+    mutados = ag.mutacao_prato(todos_no_primeiro_prato, vizinhos, 1.0, np.random.default_rng(0))
+
+    posicoes_jantar = [j for j, (_, tipo) in enumerate(plano.REFEICOES_PLANO) if tipo == "jantar"]
+    assert isolado in mutados.prato_no_tipo[:, posicoes_jantar]
