@@ -79,6 +79,12 @@ def macros_habito(perfil: pd.Series, cardapio: pd.DataFrame) -> np.ndarray:
     return np.array(habito_por_refeicao, dtype=float) / escala
 
 
+def distancia_nos_macros_presentes(macros: np.ndarray, alvo: np.ndarray) -> np.ndarray:
+    quadrados = (macros - alvo) ** 2
+    soma_na_escala_dos_quatro_macros = len(MACROS) * np.nanmean(quadrados, axis=-1)
+    return np.sqrt(soma_na_escala_dos_quatro_macros)
+
+
 def fora_da_faixa_kcal(kcal_por_dia: np.ndarray, perfil: pd.Series) -> np.ndarray:
     return np.maximum(np.abs(kcal_por_dia / perfil["kcal_dia"] - 1) - FAIXA_KCAL, 0)
 
@@ -138,8 +144,8 @@ def habito(perfil: pd.Series, cardapio: pd.DataFrame) -> Populacao:
     for tipo, alvo in zip(TIPOS_REFEICAO, alvo_do_dia, strict=True):
         pratos = pratos_do_tipo(cardapio, tipo)
         do_tipo = macros[pratos]
-        alvo_tipo = np.median(do_tipo, axis=0) if np.isnan(alvo).any() else alvo
-        distancia.append(np.linalg.norm(do_tipo - alvo_tipo, axis=1))
+        alvo_tipo = np.median(do_tipo, axis=0) if np.isnan(alvo).all() else alvo
+        distancia.append(distancia_nos_macros_presentes(do_tipo, alvo_tipo))
         kcal.append(cardapio["kcal"].to_numpy()[pratos])
         proteina.append(cardapio["proteina"].to_numpy()[pratos])
 

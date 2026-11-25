@@ -12,6 +12,7 @@ from glicose.plano import (
     REFEICOES_PLANO,
     Populacao,
     aleatoria,
+    distancia_nos_macros_presentes,
     falta_proteina,
     fora_da_faixa_kcal,
     habito,
@@ -99,10 +100,11 @@ def penalidade_proteina(pop: Populacao, perfil: pd.Series, cardapio: pd.DataFram
 
 def distancia_habito(pop: Populacao, perfil: pd.Series, cardapio: pd.DataFrame) -> np.ndarray:
     alvo = macros_habito(perfil, cardapio)
-    tem_habito = ~np.isnan(alvo).any(axis=1)
+    tem_habito = ~np.isnan(alvo).all(axis=1)
     macros_plano = macros_normalizados(cardapio)[indices_cardapio(pop, cardapio)]
-    diferenca = macros_plano[:, tem_habito] - alvo[tem_habito]
-    distancia_por_refeicao = np.linalg.norm(diferenca, axis=2)
+    distancia_por_refeicao = distancia_nos_macros_presentes(
+        macros_plano[:, tem_habito], alvo[tem_habito]
+    )
     return distancia_por_refeicao.mean(axis=1)
 
 

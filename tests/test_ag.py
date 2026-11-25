@@ -127,11 +127,20 @@ def dias_viaveis(perfil, cardapio) -> plano.Populacao:
     return todos[np.nonzero(viavel)[0]]
 
 
-def distancia_em_desvios(tipo: str, de: int, para: int) -> float:
+def distancia_em_desvios(tipo: str, de: int, para: int, macros=MACROS) -> float:
     todos_os_pratos = np.array([prato for pratos in PRATOS_PEQUENOS.values() for prato in pratos])
     desvio = todos_os_pratos.std(axis=0, ddof=1)
     diferenca = np.subtract(PRATOS_PEQUENOS[tipo][de], PRATOS_PEQUENOS[tipo][para])
-    return float(np.linalg.norm(diferenca / desvio))
+    em_desvios = pd.Series(diferenca / desvio, index=MACROS)[list(macros)]
+    return float(np.sqrt(len(MACROS) * (em_desvios**2).mean()))
+
+
+def perfil_sem_fibra_no_jantar(prato_do_habito: int) -> pd.Series:
+    perfil = perfil_pequeno()
+    carbo, proteina, gordura, _ = PRATOS_PEQUENOS["jantar"][prato_do_habito]
+    perfil[["carbo_jantar", "proteina_jantar", "gordura_jantar"]] = [carbo, proteina, gordura]
+    perfil["fibra_jantar"] = np.nan
+    return perfil
 
 
 def test_ag_acha_o_otimo_da_forca_bruta_em_10_sementes():
@@ -366,3 +375,30 @@ def test_habito_caminha_o_que_a_pessoa_caminhou_em_cada_tipo_ate_o_limite_do_gen
 
     limite = plano.LIMITES_CAMINHADA[1]
     assert inicial.caminhada[0].tolist() == [12.0, limite, 0.0] * 3
+
+
+def test_habito_sem_fibra_no_jantar_escolhe_o_jantar_mais_perto_nos_outros_macros():
+    jantar_do_habito = 0
+    perfil = perfil_sem_fibra_no_jantar(jantar_do_habito)
+    perfil["kcal_dia"] = 515.0 + 745.0 + 250.0
+
+    inicial = plano.habito(perfil, cardapio_pequeno())
+
+    assert inicial.prato_no_tipo[0].tolist() == [2, 2, jantar_do_habito] * 3
+
+
+def test_distancia_habito_sem_fibra_no_jantar_mede_os_outros_macros_na_escala_dos_quatro():
+    jantar_do_habito = 0
+    igual_ao_habito = [2, 2, jantar_do_habito] * 3
+    jantar_d9_trocado = [2, 2, jantar_do_habito] * 2 + [2, 2, 1]
+    sem_fibra = ["carbo", "proteina", "gordura"]
+
+    distancias = ag.distancia_habito(
+        planos(igual_ao_habito, jantar_d9_trocado),
+        perfil_sem_fibra_no_jantar(jantar_do_habito),
+        cardapio_pequeno(),
+    )
+
+    assert distancias == pytest.approx(
+        [0.0, distancia_em_desvios("jantar", 0, 1, macros=sem_fibra) / 9]
+    )
