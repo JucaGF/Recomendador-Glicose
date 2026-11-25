@@ -107,7 +107,9 @@ def test_otimo_exato_empata_com_a_busca_exaustiva_nos_tres_dias(sinteticos):
     )
     todos.caminhada[:, ag.POSICOES_D9] = experimentos.CAMINHADA_MAXIMA
 
-    otimo = experimentos.otimo_exato(perfil, cardapio, ag.simulador_falso, lambdas)
+    otimo = experimentos.otimo_exato(
+        perfil, cardapio, ag.simulador_falso, CONFIG_PEQUENA_COM_OUTROS_PESOS
+    )
 
     exaustiva = ag.aptidao(todos, ag.simulador_falso, perfil, cardapio, lambdas).min()
     assert ag.aptidao(otimo, ag.simulador_falso, perfil, cardapio, lambdas)[0] == pytest.approx(

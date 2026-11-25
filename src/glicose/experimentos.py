@@ -41,18 +41,17 @@ def menos_carbo_caminhando(perfil: pd.Series, cardapio: pd.DataFrame) -> Populac
 
 
 def otimo_exato(
-    perfil: pd.Series, cardapio: pd.DataFrame, simular, lambdas: Lambdas = CONFIG.lambdas
+    perfil: pd.Series, cardapio: pd.DataFrame, simular, config: ConfigAG = CONFIG
 ) -> Populacao:
-    # Com o horário fixo a aptidão é uma soma de termos de cada dia, e a iAUC prevista nunca sobe
-    # com a caminhada. Então o melhor plano junta o melhor dia sem iAUC em D7 e D8 com o melhor
-    # D9 caminhando o máximo, e basta avaliar cada combinação de café, almoço e jantar uma vez.
+    if config.horario_livre:
+        raise ValueError("o ótimo exato só vale com os horários do hábito")
     quantos = [len(pratos_do_tipo(cardapio, tipo)) for tipo in TIPOS_REFEICAO]
     dias = np.array(list(itertools.product(*map(range, quantos))))
     iguais = otimizadores.habito(perfil, cardapio)[np.zeros(len(dias), dtype=int)]
     iguais.prato_no_tipo = np.tile(dias, len(DIAS_PLANO))
     iguais.caminhada[:, ag.POSICOES_D9] = CAMINHADA_MAXIMA
     iauc = ag.iauc_d9(iguais, simular, perfil, cardapio)
-    aptidao = ag.aptidao(iguais, simular, perfil, cardapio, lambdas)
+    aptidao = ag.aptidao(iguais, simular, perfil, cardapio, config.lambdas)
     sem_iauc_por_dia = (aptidao - iauc) / len(DIAS_PLANO)
     dia_sem_iauc = dias[np.argmin(sem_iauc_por_dia)]
     dia_9 = dias[np.argmin(sem_iauc_por_dia + iauc)]
