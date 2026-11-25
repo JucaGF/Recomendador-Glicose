@@ -1,3 +1,4 @@
+import itertools
 import json
 
 import numpy as np
@@ -16,10 +17,11 @@ CONFIG_PEQUENA_COM_OUTROS_PESOS = ConfigAG(
     lambdas=Lambdas(kcal=50_000.0, proteina=20_000.0, habito=250.0),
 )
 SEMENTE = 3
-PLANOS_POR_ESTRATEGIA = 4
+SEMENTES_PEQUENAS = 2
 # A rede calcula em float32, e lotes de tamanhos diferentes podem mudar o último dígito.
 TOLERANCIA_FLOAT32 = 1e-5
 REFEICOES_COM_UMA_SUJA = 4
+PRATOS_POR_TIPO_NA_BUSCA_EXAUSTIVA = 3
 
 
 @pytest.fixture(scope="module")
@@ -86,6 +88,31 @@ def test_todos_os_pratos_do_plano_existem_no_cardapio(sinteticos, recomendado):
         prato = cardapio.loc[refeicao["prato"]]
         assert prato["tipo"] == refeicao["tipo"]
         assert [prato[m] for m in MACROS] == [refeicao[m] for m in MACROS]
+
+
+def test_otimo_exato_empata_com_a_busca_exaustiva_nos_tres_dias(sinteticos):
+    perfil = sinteticos["perfis"].iloc[0]
+    cardapio = (
+        sinteticos["cardapio"]
+        .groupby("tipo", sort=False)
+        .head(PRATOS_POR_TIPO_NA_BUSCA_EXAUSTIVA)
+        .reset_index(drop=True)
+        .assign(prato=lambda c: np.arange(len(c)))
+    )
+    lambdas = CONFIG_PEQUENA_COM_OUTROS_PESOS.lambdas
+    dias = list(itertools.product(range(PRATOS_POR_TIPO_NA_BUSCA_EXAUSTIVA), repeat=3))
+    todos = plano.habito(perfil, cardapio)[np.zeros(len(dias) ** len(DIAS_PLANO), dtype=int)]
+    todos.prato_no_tipo = np.array(
+        [np.concatenate(tres) for tres in itertools.product(dias, repeat=len(DIAS_PLANO))]
+    )
+    todos.caminhada[:, ag.POSICOES_D9] = experimentos.CAMINHADA_MAXIMA
+
+    otimo = experimentos.otimo_exato(perfil, cardapio, ag.simulador_falso, lambdas)
+
+    exaustiva = ag.aptidao(todos, ag.simulador_falso, perfil, cardapio, lambdas).min()
+    assert ag.aptidao(otimo, ag.simulador_falso, perfil, cardapio, lambdas)[0] == pytest.approx(
+        exaustiva
+    )
 
 
 def linha_feita_a_mao(participante, estrategia, semente, iauc_d9, aptidao):
@@ -173,89 +200,64 @@ def test_d9_real_entra_com_a_glicose_de_jejum_e_so_quando_esta_completo(sintetic
     )
 
 
-def refeicao_de_d9(semente, tipo, carbo, caminhada):
-    return {
-        "participante": 1,
-        "grupo": "dm2",
-        "estrategia": "ag",
-        "semente": semente,
-        "dia": 9,
-        "tipo": tipo,
-        "carbo": carbo,
-        "caminhada": caminhada,
-    }
+def test_d9_real_chega_ao_simulador_sem_a_fibra_maior_que_o_carbo(sinteticos):
+    perfil = sinteticos["perfis"].iloc[0]
+    refeicoes = sinteticos["refeicoes"]
+    da_pessoa_em_d9 = (refeicoes["participante"] == perfil["participante"]) & (
+        refeicoes["dia"] == experimentos.DIA_ALVO
+    )
+    fibra_impossivel = refeicoes.assign(
+        fibra=refeicoes["fibra"].mask(da_pessoa_em_d9, refeicoes["carbo"] + 1)
+    )
+    fibras_vistas = []
+
+    def guarda_a_fibra(entrada):
+        fibras_vistas.append(entrada["fibra"])
+        return np.zeros(len(entrada))
+
+    experimentos.comportamento_real(perfil, fibra_impossivel, sinteticos["dias"], guarda_a_fibra)
+
+    assert fibras_vistas
+    assert all(fibra.isna().all() for fibra in fibras_vistas)
 
 
-def test_maior_caminhada_so_conta_quando_e_unica():
+def test_distancia_do_otimo_compara_cada_execucao_com_o_otimo_da_pessoa():
     resultados = pd.DataFrame(
         [
-            refeicao_de_d9(0, "cafe", 10.0, 30.0),
-            refeicao_de_d9(0, "almoco", 90.0, 30.0),
-            refeicao_de_d9(0, "jantar", 20.0, 30.0),
-            refeicao_de_d9(1, "cafe", 10.0, 5.0),
-            refeicao_de_d9(1, "almoco", 90.0, 25.0),
-            refeicao_de_d9(1, "jantar", 20.0, 0.0),
-            refeicao_de_d9(2, "cafe", 10.0, 25.0),
-            refeicao_de_d9(2, "almoco", 90.0, 5.0),
-            refeicao_de_d9(2, "jantar", 20.0, 0.0),
+            linha_feita_a_mao(1, "otimo", None, 50.0, 100.0),
+            linha_feita_a_mao(1, "ag", 0, 60.0, 100.0),
+            linha_feita_a_mao(1, "ag", 1, 90.0, 150.0),
+            linha_feita_a_mao(2, "otimo", None, 50.0, 200.0),
+            linha_feita_a_mao(2, "ag", 0, 70.0, 300.0),
         ]
     )
 
-    coincidencias = figuras.caminhada_e_carbo(resultados)
+    distancia = figuras.distancia_do_otimo(resultados).loc["ag"]
 
-    assert coincidencias["caminhada_unica"].tolist() == [False, True, True]
-    assert figuras.fracao_no_mais_carbo(coincidencias)["dm2"] == 0.5
+    assert distancia["excesso_mediano"] == pytest.approx(0.5)
+    assert distancia["excesso_maximo"] == pytest.approx(0.5)
+    assert distancia["execucoes_no_otimo"] == pytest.approx(1 / 3)
 
 
-def resultados_sem_ag(sinteticos) -> tuple[pd.DataFrame, pd.DataFrame]:
-    cardapio = sinteticos["cardapio"]
-    rng = np.random.default_rng(0)
+def resultados_pequenos(sinteticos) -> tuple[pd.DataFrame, pd.DataFrame]:
+    tabelas = {nome: sinteticos[nome] for nome in ("cardapio", "refeicoes", "dias")}
     partes, curvas = [], []
     for _, perfil in sinteticos["perfis"].iterrows():
-        partes.append(
-            experimentos.comportamento_real(
-                perfil, sinteticos["refeicoes"], sinteticos["dias"], ag.simulador_falso
+        partes += experimentos.rodar_deterministicas(perfil, tabelas, ag.simulador_falso)
+        for semente in range(SEMENTES_PEQUENAS):
+            resultados, historicos = experimentos.rodar_semente(
+                perfil, tabelas, ag.simulador_falso, semente, CONFIG_PEQUENA_COM_OUTROS_PESOS
             )
-        )
-        for nome, montar in experimentos.DETERMINISTICAS.items():
-            partes.append(
-                experimentos.linhas_dos_planos(
-                    montar(perfil, cardapio), nome, None, perfil, ag.simulador_falso, cardapio
-                )
-            )
-        for semente in range(2):
-            for estrategia in ("ag", "aleatoria", "nsga2_joelho", experimentos.FRENTE):
-                aleatorios = plano.aleatoria(PLANOS_POR_ESTRATEGIA, cardapio, rng)
-                if estrategia != experimentos.FRENTE:
-                    aleatorios = aleatorios[0]
-                partes.append(
-                    experimentos.linhas_dos_planos(
-                        aleatorios, estrategia, semente, perfil, ag.simulador_falso, cardapio
-                    )
-                )
-            for estrategia in ("ag", "aleatoria"):
-                curvas.append(
-                    pd.DataFrame(
-                        {
-                            "participante": perfil["participante"],
-                            "grupo": perfil["grupo"],
-                            "estrategia": estrategia,
-                            "semente": semente,
-                            "geracao": [0, 1, 2],
-                            "avaliacoes": [100, 200, 300],
-                            "melhor": [30.0, 20.0, 10.0],
-                            "media": [60.0, 40.0, 20.0],
-                        }
-                    )
-                )
-    resultados = experimentos.conformar_com_ausentes(
-        pd.concat([p for p in partes if p is not None]), experimentos.RESULTADOS
+            partes += resultados
+            curvas += historicos
+    return (
+        experimentos.conformar_com_ausentes(pd.concat(partes), experimentos.RESULTADOS),
+        experimentos.conformar_com_ausentes(pd.concat(curvas), experimentos.CURVAS),
     )
-    return resultados, pd.concat(curvas, ignore_index=True)
 
 
 def test_figuras_saem_de_uma_tabela_pequena_sem_rodar_o_ag(sinteticos, tmp_path, monkeypatch):
-    resultados, curvas = resultados_sem_ag(sinteticos)
+    resultados, curvas = resultados_pequenos(sinteticos)
 
     def ag_proibido(*args, **kwargs):
         raise AssertionError("figuras.py não pode rodar o AG")

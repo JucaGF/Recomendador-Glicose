@@ -1,4 +1,5 @@
 import argparse
+import itertools
 import os
 import time
 from functools import cache
@@ -10,8 +11,9 @@ import tensorflow as tf
 
 from glicose import ag, nsga2, otimizadores, simulador
 from glicose.ag import ConfigAG, Lambdas
+from glicose.cardapio import fibra_cabe_no_carbo
 from glicose.esquema import DIAS_PLANO, ENTRADA_SIMULADOR, TIPOS_REFEICAO, conformar
-from glicose.plano import LIMITES_CAMINHADA, Populacao
+from glicose.plano import LIMITES_CAMINHADA, Populacao, pratos_do_tipo
 from glicose.recomendar import (
     CONFIG,
     d7_d8_do_habito,
@@ -38,6 +40,27 @@ def menos_carbo_caminhando(perfil: pd.Series, cardapio: pd.DataFrame) -> Populac
     return plano
 
 
+def otimo_exato(
+    perfil: pd.Series, cardapio: pd.DataFrame, simular, lambdas: Lambdas = CONFIG.lambdas
+) -> Populacao:
+    # Com o horário fixo a aptidão é uma soma de termos de cada dia, e a iAUC prevista nunca sobe
+    # com a caminhada. Então o melhor plano junta o melhor dia sem iAUC em D7 e D8 com o melhor
+    # D9 caminhando o máximo, e basta avaliar cada combinação de café, almoço e jantar uma vez.
+    quantos = [len(pratos_do_tipo(cardapio, tipo)) for tipo in TIPOS_REFEICAO]
+    dias = np.array(list(itertools.product(*map(range, quantos))))
+    iguais = otimizadores.habito(perfil, cardapio)[np.zeros(len(dias), dtype=int)]
+    iguais.prato_no_tipo = np.tile(dias, len(DIAS_PLANO))
+    iguais.caminhada[:, ag.POSICOES_D9] = CAMINHADA_MAXIMA
+    iauc = ag.iauc_d9(iguais, simular, perfil, cardapio)
+    aptidao = ag.aptidao(iguais, simular, perfil, cardapio, lambdas)
+    sem_iauc_por_dia = (aptidao - iauc) / len(DIAS_PLANO)
+    dia_sem_iauc = dias[np.argmin(sem_iauc_por_dia)]
+    dia_9 = dias[np.argmin(sem_iauc_por_dia + iauc)]
+    melhor = iguais[0]
+    melhor.prato_no_tipo = np.concatenate([dia_sem_iauc, dia_sem_iauc, dia_9])[None, :]
+    return melhor
+
+
 DETERMINISTICAS = {
     "habito": otimizadores.habito,
     "menos_carbo": otimizadores.menos_carbo,
@@ -51,6 +74,7 @@ ESTRATEGIAS = (
     "aleatoria",
     "ag",
     "nsga2_joelho",
+    "otimo",
 )
 FRENTE = "nsga2_frente"
 
@@ -155,6 +179,7 @@ def comportamento_real(perfil, refeicoes: pd.DataFrame, dias: pd.DataFrame, simu
     if not d9_comparavel_com_um_plano(reais, dia_alvo):
         return None
     reais = reais.sort_values("horario")
+    reais = reais.assign(fibra=reais["fibra"].where(fibra_cabe_no_carbo(reais)))
     entrada = conformar(reais.assign(glicose_pre=perfil["glicose_jejum_cgm"]), ENTRADA_SIMULADOR)
     iauc = np.asarray(simular(entrada))
     sem_caminhada = np.asarray(simular(entrada.assign(minutos_ativos_60=0.0)))
@@ -194,6 +219,8 @@ def rodar_deterministicas(perfil, tabelas: dict, simular) -> list[pd.DataFrame]:
         )
         for nome, montar in DETERMINISTICAS.items()
     ]
+    otimo = otimo_exato(perfil, tabelas["cardapio"], simular)
+    partes.append(linhas_dos_planos(otimo, "otimo", None, perfil, simular, tabelas["cardapio"]))
     real = comportamento_real(perfil, tabelas["refeicoes"], tabelas["dias"], simular)
     return partes if real is None else [real, *partes]
 

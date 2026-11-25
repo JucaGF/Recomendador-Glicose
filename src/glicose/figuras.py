@@ -16,12 +16,16 @@ from glicose.experimentos import (
 )
 from glicose.recomendar import NOMES_GRUPO, NOMES_TIPO, desenhar_grade
 from glicose.refeicoes import ARTEFATOS
+from glicose.simulador import IAUC_MINIMA
 
 PASTA_FIGURAS = ARTEFATOS / "figuras"
 CHAVE_PLANO = ["participante", "estrategia", "semente", "plano"]
 SEMENTE_EXIBIDA = 0
-TOLERANCIA_CAMINHADA_MIN = 1.0
-ACASO_MAIOR_CAMINHADA = 1 / len(TIPOS_REFEICAO)
+# A rede calcula em float32, e o mesmo plano pode variar no último dígito entre lotes.
+TOLERANCIA_OTIMO = 1e-4
+OTIMIZADORES = ("menos_carbo_caminhada", "aleatoria", "ag", "nsga2_joelho", FRENTE)
+ESTRATEGIAS_MACROS = ("habito", "menos_carbo", "aleatoria", "ag")
+ESTRATEGIAS_PISO = ("real", "menos_carbo_caminhada", "aleatoria", "ag", "otimo")
 
 DPI = 120
 POLEGADAS_POR_PAINEL = 4.5
@@ -39,7 +43,7 @@ TAMANHO_PONTO_FRENTE = 4
 TAMANHO_MARCADOR = 11
 CINZA_REFERENCIA = "0.5"
 
-PALETA = ("#257de0", "#f47230", "#00b894", "#f2a600", "#ee7fac", "#008a17", "#6a4ce2")
+PALETA = ("#257de0", "#f47230", "#00b894", "#f2a600", "#ee7fac", "#008a17", "#6a4ce2", "#8c564b")
 COR_ESTRATEGIA = dict(zip(ESTRATEGIAS, PALETA, strict=True))
 COR_GRUPO = dict(zip(GRUPOS, PALETA, strict=False))
 NOMES_ESTRATEGIA = {
@@ -50,6 +54,7 @@ NOMES_ESTRATEGIA = {
     "aleatoria": "busca aleatória",
     "ag": "AG",
     "nsga2_joelho": "NSGA-II (joelho)",
+    "otimo": "ótimo exato",
 }
 NOMES_MACRO = {"carbo": "carbo", "proteina": "proteína", "gordura": "gordura", "fibra": "fibra"}
 
@@ -76,6 +81,7 @@ def tabela_por_grupo(resultados: pd.DataFrame) -> pd.DataFrame:
         "dias_fora_kcal",
         "dias_fora_proteina",
         "distancia_habito",
+        "aptidao",
         "avaliacoes",
     ]
     por_pessoa = todos.groupby(["grupo", "estrategia", "participante"])[metricas].mean()
@@ -88,6 +94,7 @@ def tabela_por_grupo(resultados: pd.DataFrame) -> pd.DataFrame:
         dias_fora_kcal=("dias_fora_kcal", "mean"),
         dias_fora_proteina=("dias_fora_proteina", "mean"),
         distancia_habito=("distancia_habito", "mean"),
+        aptidao=("aptidao", "mean"),
         avaliacoes=("avaliacoes", "mean"),
     )
     ordem = pd.MultiIndex.from_product([GRUPOS, ESTRATEGIAS], names=["grupo", "estrategia"])
@@ -109,7 +116,7 @@ def vitorias_ag(resultados: pd.DataFrame) -> dict[str, float]:
     disputa = planos(resultados)
     disputa = disputa[disputa["estrategia"].isin(["ag", "aleatoria"])]
     vitorias = {}
-    for coluna in ("aptidao", "iauc_d9"):
+    for coluna in ("aptidao", "iauc_d9", "iauc_d9_sem_caminhada"):
         por_semente = disputa.pivot_table(
             index=["participante", "semente"], columns="estrategia", values=coluna
         )
@@ -119,34 +126,46 @@ def vitorias_ag(resultados: pd.DataFrame) -> dict[str, float]:
     return vitorias
 
 
-def macros_d9(resultados: pd.DataFrame, estrategias=("habito", "ag")) -> pd.DataFrame:
+def macros_d9(resultados: pd.DataFrame, estrategias=ESTRATEGIAS_MACROS) -> pd.DataFrame:
     d9 = resultados[(resultados["dia"] == DIA_ALVO) & resultados["estrategia"].isin(estrategias)]
     por_plano = d9.groupby([*CHAVE_PLANO, "grupo"], dropna=False)[list(MACROS)].sum()
     return media_por_pessoa(por_plano.reset_index(), list(MACROS), ["grupo", "estrategia"])
 
 
-def caminhada_e_carbo(resultados: pd.DataFrame) -> pd.DataFrame:
-    d9 = resultados[(resultados["estrategia"] == "ag") & (resultados["dia"] == DIA_ALVO)]
-    linhas = []
-    for (participante, grupo, semente), plano in d9.groupby(["participante", "grupo", "semente"]):
-        maior = plano["caminhada"].max()
-        no_maximo = plano["caminhada"] >= maior - TOLERANCIA_CAMINHADA_MIN
-        linhas.append(
-            {
-                "participante": participante,
-                "grupo": grupo,
-                "semente": semente,
-                "caminhada_unica": no_maximo.sum() == 1,
-                "maior_caminhada_no_mais_carbo": no_maximo.loc[plano["carbo"].idxmax()],
-            }
+def no_piso(resultados: pd.DataFrame) -> pd.DataFrame:
+    d9 = resultados[
+        (resultados["dia"] == DIA_ALVO) & resultados["estrategia"].isin(ESTRATEGIAS_PISO)
+    ].assign(no_piso=lambda t: t["iauc"] <= IAUC_MINIMA)
+    fracao = media_por_pessoa(d9, ["no_piso"], ["estrategia", "grupo"])["no_piso"]
+    fracao = fracao.unstack("grupo").reindex(list(ESTRATEGIAS_PISO))
+    return fracao[[g for g in GRUPOS if g in fracao.columns]]
+
+
+def distancia_do_otimo(resultados: pd.DataFrame) -> pd.DataFrame:
+    todos = planos(resultados)
+    otimo = todos[todos["estrategia"] == "otimo"].set_index("participante")["aptidao"]
+    melhor_de_cada_execucao = (
+        todos[todos["estrategia"].isin(OTIMIZADORES)]
+        .groupby(["estrategia", "participante", "semente"], dropna=False)["aptidao"]
+        .min()
+        .reset_index()
+    )
+    excesso = (
+        melhor_de_cada_execucao["aptidao"] / melhor_de_cada_execucao["participante"].map(otimo) - 1
+    )
+    melhor_de_cada_execucao = melhor_de_cada_execucao.assign(
+        excesso=excesso, no_otimo=excesso <= TOLERANCIA_OTIMO
+    )
+    return (
+        melhor_de_cada_execucao.groupby("estrategia")
+        .agg(
+            excesso_mediano=("excesso", "median"),
+            excesso_medio=("excesso", "mean"),
+            excesso_maximo=("excesso", "max"),
+            execucoes_no_otimo=("no_otimo", "mean"),
         )
-    return pd.DataFrame(linhas)
-
-
-def fracao_no_mais_carbo(coincidencias: pd.DataFrame) -> pd.Series:
-    unicas = coincidencias[coincidencias["caminhada_unica"]]
-    por_grupo = media_por_pessoa(unicas, ["maior_caminhada_no_mais_carbo"], ["grupo"])
-    return por_grupo["maior_caminhada_no_mais_carbo"]
+        .reindex(list(OTIMIZADORES))
+    )
 
 
 def mudanca_por_dia(resultados: pd.DataFrame) -> pd.DataFrame:
@@ -155,7 +174,7 @@ def mudanca_por_dia(resultados: pd.DataFrame) -> pd.DataFrame:
     ag = resultados[resultados["estrategia"] == "ag"]
     juntos = ag.merge(habito, on=chave, suffixes=("", "_habito"))
     juntos = juntos.assign(prato_trocado=juntos["prato"] != juntos["prato_habito"])
-    return media_por_pessoa(juntos, ["prato_trocado", "caminhada"], ["dia"])
+    return media_por_pessoa(juntos, ["prato_trocado"], ["dia"])
 
 
 def real_previsto_e_medido(resultados: pd.DataFrame) -> pd.Series:
@@ -168,6 +187,7 @@ def real_previsto_e_medido(resultados: pd.DataFrame) -> pd.Series:
             "medido_medio": por_pessoa["iauc_medida"].mean(),
             "erro_absoluto_medio": (por_pessoa["iauc"] - por_pessoa["iauc_medida"]).abs().mean(),
             "pearson": por_pessoa["iauc"].corr(por_pessoa["iauc_medida"]),
+            "pearson_por_refeicao": reais["iauc"].corr(reais["iauc_medida"]),
         }
     )
 
@@ -228,6 +248,7 @@ def figura_curvas(curvas: pd.DataFrame, destaque: list[int]) -> Figure:
 def figura_tabela(tabela: pd.DataFrame) -> Figure:
     grupos = [g for g in GRUPOS if g in tabela.index.get_level_values("grupo")]
     estrategias = [e for e in ESTRATEGIAS if e in tabela.index.get_level_values("estrategia")]
+    pessoas = tabela.groupby("grupo")["participantes"].max()
     celulas = []
     for estrategia in estrategias:
         linha = []
@@ -238,14 +259,16 @@ def figura_tabela(tabela: pd.DataFrame) -> Figure:
             valores = tabela.loc[(grupo, estrategia)]
             distancia = valores["distancia_habito"]
             desvio = "" if pd.isna(valores["desvio"]) else f" ± {valores['desvio']:.0f}"
+            outras_pessoas = valores["participantes"] != pessoas[grupo]
             linha.append(
                 f"{valores['iauc_d9']:.0f}{desvio}"
                 f" (sem caminhada {valores['iauc_d9_sem_caminhada']:.0f})\n"
                 f"{valores['planos_que_violam']:.0%} violam"
                 + ("" if pd.isna(distancia) else f", distância {distancia:.2f}")
+                + ("" if pd.isna(valores["aptidao"]) else f", aptidão {valores['aptidao']:.0f}")
+                + (f", só {valores['participantes']:.0f} pessoas" if outras_pessoas else "")
             )
         celulas.append(linha)
-    pessoas = tabela.groupby("grupo")["participantes"].max()
     figura = Figure(
         figsize=(
             POLEGADAS_POR_COLUNA_TABELA * (len(grupos) + 1),
@@ -263,10 +286,9 @@ def figura_tabela(tabela: pd.DataFrame) -> Figure:
     )
     quadro.scale(1, ESCALA_LINHA_TABELA)
     eixo.set_title(
-        "iAUC prevista de D9 (mg/dL·min, média ± desvio entre pessoas), as mesmas pessoas em "
-        "todas as linhas\nfração de planos com algum dia fora da faixa de kcal ou proteína e "
-        "distância do hábito em desvios-padrão. O plano do hábito usa o prato mais parecido do "
-        "cardápio e por isso muitas vezes sai da faixa"
+        "iAUC prevista de D9 (mg/dL·min, média ± desvio entre pessoas). O D9 real só existe "
+        "para parte das pessoas\nfração de planos com algum dia fora da faixa de kcal ou "
+        "proteína, distância do hábito em desvios-padrão e aptidão, que o AG minimiza"
     )
     return figura
 
@@ -341,20 +363,24 @@ def figura_macros(macros: pd.DataFrame) -> Figure:
     )
     eixos = figura.subplots(1, len(MACROS))
     for eixo, macro in zip(eixos, MACROS, strict=True):
-        valores = macros[macro].unstack("estrategia")[["habito", "ag"]]
+        valores = macros[macro].unstack("estrategia")[list(ESTRATEGIAS_MACROS)]
         valores = valores.reindex([g for g in GRUPOS if g in valores.index])
         valores.index = [NOMES_GRUPO[g] for g in valores.index]
         barras_agrupadas(eixo, valores, COR_ESTRATEGIA, NOMES_ESTRATEGIA)
         eixo.set_title(NOMES_MACRO[macro])
         eixo.set_ylabel("gramas em D9 (média por pessoa)")
     eixos[0].legend()
-    figura.suptitle("Macros de D9 no plano do AG contra o plano do hábito")
+    figura.suptitle(
+        "Macros de D9 por estratégia. O simulador nunca prevê menos glicose com mais carbo, e a "
+        "faixa de kcal\nobriga a trocar o carbo por proteína e gordura, então o menos carbo e a "
+        "busca aleatória chegam perto do AG sem buscar isso"
+    )
     return figura
 
 
-def figura_caminhada(resultados: pd.DataFrame, coincidencias: pd.DataFrame) -> Figure:
+def figura_caminhada(resultados: pd.DataFrame, piso: pd.DataFrame) -> Figure:
     figura = Figure(figsize=(3 * POLEGADAS_POR_PAINEL, ALTURA_FIGURA), layout="constrained")
-    por_tipo, coincide = figura.subplots(1, 2)
+    por_tipo, no_piso_do_simulador = figura.subplots(1, 2)
     d9 = resultados[(resultados["estrategia"] == "ag") & (resultados["dia"] == DIA_ALVO)]
     caminhada = media_por_pessoa(d9, ["caminhada"], ["tipo", "grupo"])["caminhada"]
     caminhada = caminhada.unstack("grupo").reindex(list(TIPOS_REFEICAO))
@@ -362,47 +388,35 @@ def figura_caminhada(resultados: pd.DataFrame, coincidencias: pd.DataFrame) -> F
     caminhada.index = [NOMES_TIPO[t] for t in caminhada.index]
     barras_agrupadas(por_tipo, caminhada, COR_GRUPO, NOMES_GRUPO)
     por_tipo.set_ylabel("minutos de caminhada (média por pessoa)")
-    por_tipo.set_title("Caminhada depois de cada refeição de D9 no plano do AG")
+    por_tipo.set_title(
+        "Caminhada depois de cada refeição de D9 no plano do AG\n"
+        "o simulador nunca prevê mais glicose com mais caminhada, então o AG vai ao limite"
+    )
     por_tipo.legend()
 
-    fracao = fracao_no_mais_carbo(coincidencias)
-    grupos = [g for g in GRUPOS if g in fracao.index]
-    coincide.bar(
-        [NOMES_GRUPO[g] for g in grupos], fracao[grupos], color=[COR_GRUPO[g] for g in grupos]
+    piso = piso.dropna(how="all")
+    piso.index = [NOMES_ESTRATEGIA[e] for e in piso.index]
+    barras_agrupadas(no_piso_do_simulador, piso, COR_GRUPO, NOMES_GRUPO)
+    no_piso_do_simulador.set_ylim(0, 1)
+    no_piso_do_simulador.set_ylabel("fração das refeições de D9 (média por pessoa)")
+    no_piso_do_simulador.set_title(
+        "Refeições de D9 com iAUC prevista igual a 0, o piso do simulador\n"
+        "nelas o prato e a caminhada não mudam mais a previsão"
     )
-    coincide.axhline(
-        ACASO_MAIOR_CAMINHADA, color=CINZA_REFERENCIA, linestyle="--", label="acaso (1/3)"
-    )
-    coincide.set_ylim(0, 1)
-    unicas = int(coincidencias["caminhada_unica"].sum())
-    coincide.set_ylabel("fração dos planos (média por pessoa)")
-    coincide.set_title(
-        "A maior caminhada de D9 vem depois da refeição de mais carbo\n"
-        f"só os {unicas} de {len(coincidencias)} planos com uma maior caminhada única"
-    )
-    coincide.legend()
+    no_piso_do_simulador.legend()
     return figura
 
 
 def figura_mudanca(mudanca: pd.DataFrame) -> Figure:
-    rotulos = [f"D{d}" for d in mudanca.index]
-    paineis = (
-        ("prato_trocado", "fração de pratos trocados", "Pratos diferentes do hábito"),
-        ("caminhada", "minutos (média)", "Caminhada (o hábito tem 0)"),
-    )
-    figura = Figure(
-        figsize=(POLEGADAS_POR_PAINEL * len(paineis), ALTURA_FIGURA), layout="constrained"
-    )
-    eixos = figura.subplots(1, len(paineis))
-    for eixo, (coluna, rotulo_y, titulo) in zip(eixos, paineis, strict=True):
-        eixo.bar(rotulos, mudanca[coluna], color=COR_ESTRATEGIA["ag"])
-        eixo.axhline(0, color=CINZA_REFERENCIA, linewidth=1)
-        eixo.set_ylabel(rotulo_y)
-        eixo.set_title(titulo)
-        eixo.set_xlabel("dia do plano")
-    figura.suptitle(
-        "Plano do AG contra o hábito em cada dia. Os horários são os do hábito nos três dias,\n"
-        "e em D7 e D8 só os pratos entram na aptidão, então a caminhada fica a do hábito"
+    figura = Figure(figsize=(POLEGADAS_POR_PAINEL, ALTURA_FIGURA), layout="constrained")
+    eixo = figura.subplots()
+    eixo.bar([f"D{d}" for d in mudanca.index], mudanca["prato_trocado"], color=COR_ESTRATEGIA["ag"])
+    eixo.set_ylim(0, 1)
+    eixo.set_ylabel("fração de pratos trocados (média por pessoa)")
+    eixo.set_xlabel("dia do plano")
+    eixo.set_title(
+        "Pratos do AG diferentes do hábito\n"
+        "em D7 e D8 só a faixa e a distância\ndo hábito entram na aptidão"
     )
     return figura
 
@@ -425,7 +439,12 @@ def figura_frentes(resultados: pd.DataFrame, destaque: list[int]) -> Figure:
             markersize=TAMANHO_PONTO_FRENTE,
             label=f"frente do NSGA-II ({len(frente)} planos)",
         )
-        for estrategia, marcador in (("habito", "*"), ("ag", "s"), ("nsga2_joelho", "D")):
+        for estrategia, marcador in (
+            ("habito", "*"),
+            ("ag", "s"),
+            ("nsga2_joelho", "D"),
+            ("otimo", "P"),
+        ):
             ponto = dela[dela["estrategia"] == estrategia]
             eixo.plot(
                 ponto["iauc_d9"],
@@ -448,14 +467,15 @@ def figura_planos(resultados: pd.DataFrame, destaque: list[int]) -> Figure:
     figura = Figure(figsize=(LARGURA_GRADE, ALTURA_GRADE * len(destaque)), layout="constrained")
     subfiguras = np.atleast_1d(figura.subfigures(len(destaque), 1))
     for subfigura, participante in zip(subfiguras, destaque, strict=True):
-        plano = resultados[
-            (resultados["participante"] == participante)
-            & (resultados["estrategia"] == "ag")
-            & (resultados["semente"] == SEMENTE_EXIBIDA)
-        ].sort_values(["dia", "horario"])
+        do_ag = resultados[
+            (resultados["participante"] == participante) & (resultados["estrategia"] == "ag")
+        ]
+        melhor_semente = do_ag.loc[do_ag["aptidao"].idxmin(), "semente"]
+        plano = do_ag[do_ag["semente"] == melhor_semente].sort_values(["dia", "horario"])
         grupo = NOMES_GRUPO[plano["grupo"].iloc[0]]
         titulo = (
-            f"Participante {participante:03d} ({grupo}), plano do AG, iAUC prevista de D9 "
+            f"Participante {participante:03d} ({grupo}), melhor plano do AG em "
+            f"{do_ag['semente'].nunique()} sementes, iAUC prevista de D9 "
             f"{plano['iauc_d9'].iloc[0]:.0f} mg/dL·min"
         )
         desenhar_grade(subfigura, plano, titulo)
@@ -466,10 +486,10 @@ def gerar(resultados: pd.DataFrame, curvas: pd.DataFrame, pasta: Path = PASTA_FI
     destaque = vitrine(planos(resultados).groupby("participante")["grupo"].first())
     figuras = {
         "curvas_reais": figura_curvas(curvas, destaque),
-        "tabela_grupos": figura_tabela(tabela_por_grupo(so_com_real(resultados))),
+        "tabela_grupos": figura_tabela(tabela_por_grupo(resultados)),
         "ag_vs_aleatoria_real": figura_ag_vs_aleatoria(resultados, curvas, destaque),
         "plausibilidade_macros": figura_macros(macros_d9(resultados)),
-        "caminhada_refeicao": figura_caminhada(resultados, caminhada_e_carbo(resultados)),
+        "caminhada_refeicao": figura_caminhada(resultados, no_piso(resultados)),
         "d7_d8_vs_habito": figura_mudanca(mudanca_por_dia(resultados)),
         "frente_real": figura_frentes(resultados, destaque),
         "planos_tres_grupos": figura_planos(resultados, destaque),
@@ -492,27 +512,25 @@ def imprimir(resultados: pd.DataFrame) -> None:
         "dias_fora_kcal",
         "dias_fora_proteina",
         "distancia_habito",
+        "aptidao",
         "avaliacoes",
     ]
     with pd.option_context("display.width", 200, "display.max_columns", 20):
         print("iAUC prevista de D9 por grupo e estratégia (mg/dL·min), todos os participantes")
         print(tabela_por_grupo(resultados)[colunas_tabela].round(2).to_string())
-        print("\nmesma tabela só com quem tem D9 real completo (a da figura)")
+        print("\nmesma tabela só com quem tem D9 real completo")
         print(tabela_por_grupo(so_com_real(resultados))[colunas_tabela].round(2).to_string())
         print("\nparte do ganho do AG sobre o hábito que vem da caminhada, por grupo")
         print(parte_da_caminhada(tabela_por_grupo(resultados)).round(2).to_string())
         print("\nAG contra busca aleatória com o mesmo número de avaliações (fração de vitórias)")
         for nome, valor in vitorias_ag(resultados).items():
             print(f"  {nome}: {valor:.1%}")
-        print("\nmacros de D9 em gramas, plano do hábito contra plano do AG")
-        print(macros_d9(resultados).round(1).to_string())
-        coincidencias = caminhada_e_carbo(resultados)
-        unicas = int(coincidencias["caminhada_unica"].sum())
-        print(
-            "\nmaior caminhada de D9 depois da refeição de mais carbo, só nos "
-            f"{unicas} de {len(coincidencias)} planos com uma maior caminhada única"
-        )
-        print(fracao_no_mais_carbo(coincidencias).round(2).to_string())
+        print("\naptidão de cada execução acima do ótimo exato (fração) e execuções no ótimo")
+        print(distancia_do_otimo(resultados).round(3).to_string())
+        print("\nmacros de D9 em gramas por estratégia")
+        print(macros_d9(resultados).unstack("estrategia").round(1).to_string())
+        print("\nfração das refeições de D9 com iAUC prevista no piso do simulador")
+        print(no_piso(resultados).round(3).to_string())
         print("\nD9 real: iAUC prevista com a glicose de jejum contra a medida, soma do dia")
         print(real_previsto_e_medido(resultados).round(2).to_string())
         print("\nplano do AG contra o hábito, por dia")
