@@ -25,13 +25,10 @@ IAUC_POR_GRAMA_CARBO = 1.5
 N_REFEICOES_PLANO = 300
 CAMINHADA_MAXIMA = 30
 HORARIO_MAXIMO = 23.0
-EPOCAS_RAPIDAS = 5
-CONFIG_RAPIDA = ConfigRede(epocas=EPOCAS_RAPIDAS, n_redes=2)
-CONFIG_DUAS_REDES = ConfigRede(n_redes=2)
+CONFIG_RAPIDA = ConfigRede(epocas=5, n_redes=2)
 IAUC_QUE_NAO_PODE_VAZAR = 1e6
 FIBRA_IMPOSSIVEL_G = 2000.0
 TOLERANCIA_IAUC = 1e-4
-# A rede faz as contas em float32, que guarda uns 7 dígitos da iAUC em mg/dL·min.
 TOLERANCIA_FLOAT32 = 1e-5
 N_REFEICOES_GRADE = 20
 GRADE_CARBO_G = np.linspace(0, 150, 31)
@@ -45,9 +42,7 @@ def sinteticos():
 
 @pytest.fixture(scope="module")
 def simulador(sinteticos):
-    return treinar_final(
-        sinteticos["refeicoes"], sinteticos["perfis"], EPOCAS_RAPIDAS, CONFIG_RAPIDA
-    )
+    return treinar_final(sinteticos["refeicoes"], sinteticos["perfis"], CONFIG_RAPIDA)
 
 
 @pytest.fixture
@@ -95,12 +90,12 @@ def test_rede_erra_menos_que_a_media_quando_a_iauc_vem_do_carbo(sinteticos):
     sem_atividade = refeicoes["participante"] % 3 == 0
     refeicoes.loc[sem_atividade, "minutos_ativos_60"] = np.nan
 
-    previsoes, melhores_epocas = validar(refeicoes, sinteticos["perfis"], CONFIG_DUAS_REDES)
+    previsoes, melhores_epocas = validar(refeicoes, sinteticos["perfis"], CONFIG_RAPIDA)
     tabela = resumir(previsoes)
 
     assert tabela.loc["rede", "mae_d7_d9"] < tabela.loc["media", "mae_d7_d9"]
-    assert len(melhores_epocas) == N_FOLDS * CONFIG_DUAS_REDES.n_redes
-    assert all(1 <= epoca <= CONFIG_DUAS_REDES.epocas for epoca in melhores_epocas)
+    assert len(melhores_epocas) == N_FOLDS * CONFIG_RAPIDA.n_redes
+    assert all(1 <= epoca <= CONFIG_RAPIDA.epocas for epoca in melhores_epocas)
 
 
 def test_tabela_separa_os_dias_de_teste_dos_de_habito():
@@ -141,7 +136,7 @@ def test_modelo_final_treina_com_d1_a_d6_de_todos_os_participantes(sinteticos, m
         return fit_original(modelo, x, y, **kwargs)
 
     monkeypatch.setattr(keras.Model, "fit", fit_espiao)
-    treinar_final(sinteticos["refeicoes"], sinteticos["perfis"], EPOCAS_RAPIDAS, CONFIG_RAPIDA)
+    treinar_final(sinteticos["refeicoes"], sinteticos["perfis"], CONFIG_RAPIDA)
 
     refeicoes = sinteticos["refeicoes"]
     habito = refeicoes[refeicoes["dia"].isin(DIAS_HABITO)]

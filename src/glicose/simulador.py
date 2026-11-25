@@ -1,5 +1,5 @@
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import joblib
@@ -44,9 +44,6 @@ ATRIBUTOS = (
 )
 COLUNA_CARBO = ATRIBUTOS.index("carbo")
 COLUNA_CAMINHADA = ATRIBUTOS.index("minutos_ativos_60")
-# A rede não lê as kcal. Elas quase repetem 4 × carbo + 4 × proteína + 9 × gordura, e no
-# contexto mais carbo mudaria a base e a sensibilidade pelas kcal. Aí a garantia de sinal
-# valeria só com as kcal paradas.
 FORA_DO_CONTEXTO = ("carbo", "minutos_ativos_60", "kcal")
 COLUNAS_CONTEXTO = [i for i, nome in enumerate(ATRIBUTOS) if nome not in FORA_DO_CONTEXTO]
 
@@ -96,18 +93,13 @@ def construir_modelo(config: ConfigRede, nome: str = "rede") -> keras.Model:
     oculta = contexto
     for _ in range(config.n_camadas):
         oculta = keras.layers.Dense(config.n_neuronios, activation="relu")(oculta)
-        # São poucas centenas de refeições por treino, e sem Dropout a rede decoraria essas
-        # refeições.
+        # Cada treino vê menos de mil refeições. Sem Dropout a rede decoraria essas refeições.
         oculta = keras.layers.Dropout(config.dropout)(oculta)
     base = keras.layers.Dense(1)(oculta)
-    # A softplus nunca é negativa. Assim mais carbo nunca baixa a previsão e mais caminhada
-    # nunca a sobe, para qualquer pessoa e qualquer refeição.
     sensibilidade = keras.layers.Dense(1, activation="softplus")(oculta)
     beneficio_caminhada = keras.layers.Dense(1, activation="softplus")(oculta)
     saida = base + sensibilidade * carbo - beneficio_caminhada * caminhada
-    # Dentro de media_das_redes o Keras recusa duas redes com o mesmo nome.
     modelo = keras.Model(entrada, saida, name=nome)
-    # O notebook usa mse. Aqui a nota é o MAE, e a rede treina com a mesma conta.
     modelo.compile(loss="mae", optimizer=keras.optimizers.SGD(config.taxa_aprendizado))
     return modelo
 
@@ -129,8 +121,8 @@ class Simulador:
 
     def para_iauc(self, saida: np.ndarray) -> np.ndarray:
         iauc = self.escala_alvo.inverse_transform(np.asarray(saida).reshape(-1, 1)).ravel()
-        # A saída é uma reta no carbo e na caminhada e nos extremos sai da faixa de iAUC do
-        # treino, onde não há dado. Sem o piso, o AG, que minimiza a previsão, buscaria iAUC
+        # A saída é uma reta no carbo e na caminhada. Nos extremos ela sai da faixa de iAUC do
+        # treino, onde não há dado. O AG minimiza a previsão. Sem o piso, ele buscaria iAUC
         # negativa com pouco carbo e muita caminhada.
         return np.clip(iauc, IAUC_MINIMA, self.iauc_maxima)
 
@@ -143,9 +135,9 @@ class Simulador:
 
 def escalas(treino: Particao) -> tuple[Pipeline, StandardScaler]:
     preparo = make_pipeline(SimpleImputer(strategy="median"), StandardScaler())
-    # Com a perda MAE o passo do SGD não cresce com o erro, e em mg/dL·min a sensibilidade
-    # teria de chegar a milhares. Sem padronizar o alvo, a rede para cedo e erra mais na
-    # validação cruzada.
+    # Com a perda MAE o passo do SGD não cresce com o erro. A iAUC chega a milhares de
+    # mg/dL·min, e a rede levaria muitos passos pequenos até lá. Sem padronizar o alvo, ela
+    # para cedo e erra mais na validação cruzada.
     escala_alvo = StandardScaler()
     return preparo.fit(treino.atributos), escala_alvo.fit(treino.iauc.reshape(-1, 1))
 
@@ -187,9 +179,6 @@ def treinar(treino: Particao, config: ConfigRede, semente: int) -> tuple[Simulad
 
 def particao_do_estudo(refeicoes: pd.DataFrame, perfis: pd.DataFrame) -> Particao:
     estudo = refeicoes[refeicoes["dia"].isin(DIAS_ESTUDO)]
-    # A fibra faz parte do carbo total. Acima dele o registro está errado e vira valor ausente.
-    # A regra fica nos dados do estudo, porque no prever a fibra passaria a mudar com o carbo
-    # e quebraria a garantia de sinal.
     estudo = estudo.assign(fibra=estudo["fibra"].where(estudo["fibra"] <= estudo["carbo"]))
     return Particao(estudo, montar_atributos(estudo, perfis))
 
@@ -240,7 +229,6 @@ def mae_por(previsoes: pd.DataFrame, coluna: str) -> pd.Series:
 def treinar_final(
     refeicoes: pd.DataFrame,
     perfis: pd.DataFrame,
-    epocas: int,
     config: ConfigRede = ConfigRede(),
     semente: int = SEMENTE,
 ) -> Simulador:
@@ -253,7 +241,7 @@ def treinar_final(
     for semente_rede in sementes_das_redes(config, semente):
         keras.utils.set_random_seed(semente_rede)
         rede = construir_modelo(config, nome=f"rede_{semente_rede}")
-        rede.fit(x, y, epochs=epocas, batch_size=config.tamanho_lote, verbose=0)
+        rede.fit(x, y, epochs=config.epocas, batch_size=config.tamanho_lote, verbose=0)
         redes.append(rede)
     return Simulador(media_das_redes(redes), preparo, escala_alvo, float(habito.iauc.max()))
 
@@ -296,7 +284,7 @@ def main() -> None:
         print(mae_por(previsoes, coluna).round(1).to_string())
 
     epocas = int(np.median(melhores_epocas))
-    simulador = treinar_final(refeicoes, perfis, epocas, config)
+    simulador = treinar_final(refeicoes, perfis, replace(config, epocas=epocas))
     salvar(simulador)
     teste = teste_d7_d9(simulador, refeicoes, perfis)
     mae_teste = (teste[ALVO] - teste["previsto"]).abs().mean()
