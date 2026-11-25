@@ -1,4 +1,5 @@
 import argparse
+import itertools
 import os
 import time
 from collections.abc import Callable
@@ -30,6 +31,7 @@ from glicose.plano import (
     N_REFEICOES,
     Populacao,
     falta_proteina,
+    fora_da_faixa_kcal,
     habito,
     horarios,
     limites_intervalo,
@@ -51,7 +53,6 @@ FOLGA_GRAMAS = 2.0
 PASSO_HORARIO = 0.25
 MINUTOS_POR_HORA = 60
 PERCENTIL_GLICOSE_PRE = 90
-LINEAR_ATE = 100
 
 DPI = 120
 POLEGADAS_POR_PAINEL = 4.5
@@ -74,7 +75,6 @@ Simular = Callable[[pd.DataFrame], np.ndarray]
 
 class Saida(NamedTuple):
     tabela: pd.DataFrame
-    plano: Populacao | None
     segundos_cpu: float
 
 
@@ -182,7 +182,6 @@ def rodar_variante(variante: str, participante: int, semente: int) -> Saida:
     def simular(refeicoes):
         return sim.prever(perfil, refeicoes)
 
-    plano = None
     if variante == "sem_travas":
         perfis = tabelas["perfis"].reset_index(drop=True)
         limites = limites_livres(treino_do_simulador(tabelas["refeicoes"], perfis))
@@ -196,58 +195,113 @@ def rodar_variante(variante: str, participante: int, semente: int) -> Saida:
         plano = otimo_exato(perfil, cardapio, simular, CONFIG)
         d9 = d9_do_plano(plano, perfil, cardapio)
     d9 = d9.assign(iauc=simular(d9), variante=variante, semente=semente, grupo=perfil["grupo"])
-    return Saida(d9, plano, time.process_time() - inicio)
+    return Saida(d9, time.process_time() - inicio)
 
 
-def matriz_personalizacao(
-    planos: dict[int, Populacao],
+def dias_viaveis(cardapio: pd.DataFrame, perfis: pd.DataFrame) -> np.ndarray:
+    """Todos os dias de D9 do cardápio que cabem numa faixa de kcal e num piso de proteína comuns
+    a todos. Com a faixa e o piso de cada um, o plano de uma pessoa perderia no perfil de outra só
+    por sair das calorias dela. Devolve as linhas do cardápio, com forma (dias, TIPOS_REFEICAO)."""
+    por_tipo = [np.flatnonzero(cardapio["tipo"] == tipo) for tipo in TIPOS_REFEICAO]
+    dias = np.array(list(itertools.product(*por_tipo)))
+    comum = perfis[["kcal_dia", "proteina_dia"]].median()
+    kcal = cardapio["kcal"].to_numpy()[dias].sum(axis=1)
+    proteina = cardapio["proteina"].to_numpy()[dias].sum(axis=1)
+    cabe = (fora_da_faixa_kcal(kcal, comum) == 0) & (falta_proteina(proteina, comum) == 0)
+    return dias[cabe]
+
+
+def iauc_dos_dias(
+    dias: np.ndarray, perfil: pd.Series, cardapio: pd.DataFrame, simular: Simular
+) -> np.ndarray:
+    """A rede desconta a caminhada com um peso nunca negativo, então caminhar o máximo é sempre o
+    melhor e a escolha fica só nos pratos."""
+    tabela = cardapio.iloc[dias.ravel()].assign(
+        participante=perfil["participante"],
+        dia=DIA_ALVO,
+        horario=np.tile(horario_d9(perfil, cardapio), len(dias)),
+        glicose_pre=perfil["glicose_jejum_cgm"],
+        minutos_ativos_60=LIMITES_CAMINHADA[1],
+    )
+    iauc = np.asarray(simular(conformar(tabela, ENTRADA_SIMULADOR)))
+    return iauc.reshape(len(dias), len(TIPOS_REFEICAO)).sum(axis=1)
+
+
+def iauc_por_pessoa(
+    dias: np.ndarray,
     perfis: pd.DataFrame,
     cardapio: pd.DataFrame,
     simulador_de: Callable[[pd.Series], Simular],
-    lambdas: Lambdas | None = None,
 ) -> pd.DataFrame:
-    """O plano leva os pratos e a caminhada. O horário é o do hábito da coluna, porque o sistema
-    fixa os horários no hábito de quem segue o plano, e assim a matriz mede só a escolha dos
-    pratos e da caminhada."""
-    donos = list(planos)
-    todos = Populacao.juntar(*planos.values())
-    colunas = {}
-    for participante in donos:
-        perfil = perfis.loc[participante]
-        nos_horarios = todos.copiar()
-        nos_horarios.intervalo[:] = habito(perfil, cardapio).intervalo
-        simular = simulador_de(perfil)
-        if lambdas is None:
-            colunas[participante] = ag.iauc_d9(nos_horarios, simular, perfil, cardapio)
-        else:
-            colunas[participante] = ag.aptidao(nos_horarios, simular, perfil, cardapio, lambdas)
-    matriz = pd.DataFrame(colunas, index=donos)
+    """Uma linha por pessoa e uma coluna por dia viável, com a iAUC prevista de D9 no perfil, no
+    horário do hábito e na glicose de jejum dessa pessoa."""
+    linhas = {
+        participante: iauc_dos_dias(dias, perfil, cardapio, simulador_de(perfil))
+        for participante, perfil in perfis.iterrows()
+    }
+    return pd.DataFrame.from_dict(linhas, orient="index")
+
+
+def planos_proprios(iauc: pd.DataFrame) -> np.ndarray:
+    """O plano de cada pessoa é o dia viável de menor iAUC no perfil dela."""
+    return iauc.to_numpy().argmin(axis=1)
+
+
+def matriz_personalizacao(iauc: pd.DataFrame) -> pd.DataFrame:
+    previsto = iauc.to_numpy()[:, planos_proprios(iauc)]
+    matriz = pd.DataFrame(previsto.T, index=iauc.index, columns=iauc.index)
     matriz.index.name, matriz.columns.name = "plano_de", "perfil_de"
     return matriz
 
 
-def diagonal_minima(matriz: pd.DataFrame) -> pd.Series:
-    diagonal = pd.Series(np.diag(matriz), index=matriz.columns)
-    return diagonal <= matriz.min(axis=0)
+def diagonal_estrita(matriz: pd.DataFrame) -> pd.Series:
+    """A diagonal nunca passa do mínimo da coluna, porque cada plano é o ótimo do seu dono no mesmo
+    conjunto de dias. O que mede a personalização é ela ficar estritamente abaixo de todos os
+    planos dos outros, o que um simulador que ignora o perfil nunca faz."""
+    dos_outros = matriz.where(~np.eye(len(matriz), dtype=bool))
+    return pd.Series(np.diag(matriz) < dos_outros.min(axis=0).to_numpy(), index=matriz.columns)
 
 
-def perda_plano_do_grupo(matriz: pd.DataFrame, grupos: pd.Series) -> pd.DataFrame:
-    """O plano do grupo é o que um recomendador sem personalização daria a todos do grupo."""
+def perda_de_outro_plano(matriz: pd.DataFrame) -> pd.Series:
+    perda = matriz.sub(np.diag(matriz), axis=1).to_numpy()
+    return pd.Series(perda[~np.eye(len(matriz), dtype=bool)])
+
+
+def perda_plano_do_grupo(iauc: pd.DataFrame, grupos: pd.Series) -> pd.DataFrame:
+    """O plano do grupo é o dia viável de menor iAUC média prevista nos outros membros do grupo, o
+    que um recomendador sem personalização daria a quem chega sem ser visto."""
     linhas = []
     for grupo, membros in grupos.groupby(grupos):
-        no_grupo = matriz.loc[membros.index, membros.index]
-        plano_do_grupo = no_grupo.mean(axis=1).idxmin()
-        for participante in membros.index:
-            proprio = no_grupo.loc[participante, participante]
+        do_grupo = iauc.loc[membros.index]
+        soma = do_grupo.sum()
+        for participante, proprio in do_grupo.iterrows():
+            plano_do_grupo = (soma - proprio).idxmin()
             linhas.append(
                 {
                     "participante": participante,
                     "grupo": grupo,
-                    "plano_do_grupo": plano_do_grupo,
-                    "perda": no_grupo.loc[plano_do_grupo, participante] - proprio,
+                    "perda": proprio[plano_do_grupo] - proprio.min(),
                 }
             )
     return pd.DataFrame(linhas)
+
+
+def simulador_cego(
+    sim: simulador.Simulador, perfis: pd.DataFrame
+) -> Callable[[pd.Series], Simular]:
+    """O mesmo simulador com os atributos de perfil trocados pela média da população. Sobram o
+    horário do hábito e a glicose de jejum de cada pessoa, que entram como dados da refeição."""
+    media = perfis[list(simulador.ATRIBUTOS_PERFIL)].mean()
+    media["sexo_masculino"] = (perfis["sexo"] == "M").mean()
+
+    def de(perfil: pd.Series) -> Simular:
+        def simular(refeicoes: pd.DataFrame) -> np.ndarray:
+            atributos = simulador.montar_atributos(refeicoes, pd.DataFrame([perfil]))
+            return sim.prever_atributos(atributos.assign(**media))
+
+        return simular
+
+    return de
 
 
 def ordem_por_grupo(grupos: pd.Series) -> list[int]:
@@ -302,7 +356,7 @@ def rodar_fold(versao: str, fold: int) -> Saida:
     previsto = teste.refeicoes.assign(
         versao=versao, fold=fold, previsto=sim.prever_atributos(teste.atributos)
     )
-    return Saida(previsto, None, time.process_time() - inicio)
+    return Saida(previsto, time.process_time() - inicio)
 
 
 def erro_por_fold(previsoes: pd.DataFrame, alvo: str) -> pd.DataFrame:
@@ -479,17 +533,15 @@ def analisar_horario_livre(planos_d9: pd.DataFrame) -> str:
     )
 
 
-MEDIDAS_PERSONALIZACAO = {"iauc": None, "aptidao": CONFIG.lambdas}
-TITULOS_MEDIDA = {
-    "iauc": "iAUC prevista de D9",
-    "aptidao": "aptidão do AG (iAUC + penalidades)",
+TITULOS_SIMULADOR = {
+    "perfil": "simulador com o perfil de cada pessoa",
+    "cego": "perfil trocado pela média da população",
 }
 
 
 def desenhar_mapa(eixo, matriz: pd.DataFrame, grupos: pd.Series, titulo: str):
-    acima_do_proprio = 100 * (matriz / np.diag(matriz) - 1)
-    limite = np.nanpercentile(np.abs(acima_do_proprio.to_numpy()), 95)
-    imagem = eixo.imshow(acima_do_proprio, cmap="RdBu_r", vmin=-limite, vmax=limite)
+    perda = matriz.sub(np.diag(matriz), axis=1)
+    imagem = eixo.imshow(perda, cmap="Reds", vmin=0, vmax=np.nanpercentile(perda.to_numpy(), 95))
     fronteiras = np.cumsum(grupos.loc[matriz.index].value_counts().reindex(GRUPOS).fillna(0))
     for fronteira in fronteiras[:-1]:
         eixo.axhline(fronteira - 0.5, color="k", linewidth=1)
@@ -503,67 +555,99 @@ def desenhar_mapa(eixo, matriz: pd.DataFrame, grupos: pd.Series, titulo: str):
     return imagem
 
 
-def analisar_personalizacao(planos: dict[int, Populacao], grupos: pd.Series) -> str:
-    tabelas = dados()
-    sim = tabelas["simulador"]
-    ordem = ordem_por_grupo(grupos.loc[list(planos)])
-    matrizes = {
-        medida: matriz_personalizacao(
-            {p: planos[p] for p in ordem},
-            tabelas["perfis"],
-            tabelas["cardapio"],
-            lambda perfil: lambda refeicoes: sim.prever(perfil, refeicoes),
-            lambdas,
+def concordancia(iauc: pd.DataFrame) -> float:
+    """Correlação de postos média entre duas pessoas na ordem dos dias. Perto de 1, o simulador
+    ordena os dias quase igual para todos, e sobra pouco para personalizar."""
+    correlacao = np.corrcoef(iauc.rank(axis=1).to_numpy())
+    return float(correlacao[np.triu_indices(len(iauc), 1)].mean())
+
+
+class Personalizacao(NamedTuple):
+    matriz: pd.DataFrame
+    n_planos: int
+    estrita: pd.Series
+    perda_outro: pd.Series
+    perda_grupo: pd.DataFrame
+    concordancia: float
+
+    @staticmethod
+    def medir(iauc: pd.DataFrame, grupos: pd.Series) -> "Personalizacao":
+        matriz = matriz_personalizacao(iauc)
+        return Personalizacao(
+            matriz,
+            len(np.unique(planos_proprios(iauc))),
+            diagonal_estrita(matriz),
+            perda_de_outro_plano(matriz),
+            perda_plano_do_grupo(iauc, grupos),
+            concordancia(iauc),
         )
-        for medida, lambdas in MEDIDAS_PERSONALIZACAO.items()
+
+    def resumo(self) -> str:
+        return (
+            f"{self.n_planos} planos distintos; o próprio plano é estritamente o melhor da coluna "
+            f"em {self.estrita.sum()} de {len(self.estrita)}; o plano de outra pessoa custa "
+            f"mediana {self.perda_outro.median():.0f} mg/dL·min (percentil 90 "
+            f"{self.perda_outro.quantile(0.9):.0f}) e o feito para os outros do grupo "
+            f"{self.perda_grupo['perda'].median():.0f}; correlação de postos média entre pessoas "
+            f"{self.concordancia:.3f}"
+        )
+
+
+def analisar_personalizacao(grupos: pd.Series) -> str:
+    tabelas = dados()
+    sim, cardapio = tabelas["simulador"], tabelas["cardapio"]
+    ordem = ordem_por_grupo(grupos)
+    perfis = tabelas["perfis"].loc[ordem]
+    grupos = grupos.loc[ordem]
+    dias = dias_viaveis(cardapio, perfis)
+    simuladores = {
+        "perfil": lambda perfil: lambda refeicoes: sim.prever(perfil, refeicoes),
+        "cego": simulador_cego(sim, perfis),
+    }
+    medidas = {
+        nome: Personalizacao.medir(iauc_por_pessoa(dias, perfis, cardapio, de), grupos)
+        for nome, de in simuladores.items()
     }
     PASTA.mkdir(parents=True, exist_ok=True)
     longa = pd.concat(
-        {medida: m.stack().rename("valor") for medida, m in matrizes.items()}, names=["medida"]
+        {nome: m.matriz.stack().rename("iauc") for nome, m in medidas.items()}, names=["simulador"]
     )
     longa.reset_index().to_parquet(PASTA / "matriz_personalizacao.parquet", index=False)
-    acertos = {medida: diagonal_minima(m) for medida, m in matrizes.items()}
-    perdas = {medida: perda_plano_do_grupo(m, grupos.loc[ordem]) for medida, m in matrizes.items()}
 
     fig, eixos = figura(2, largura=7.5, altura=7.5)
-    for eixo, (medida, matriz) in zip(eixos, matrizes.items(), strict=True):
+    for eixo, (nome, medida) in zip(eixos, medidas.items(), strict=True):
         titulo = (
-            f"{TITULOS_MEDIDA[medida]}\ndiagonal é a menor da coluna em "
-            f"{acertos[medida].sum()} de {len(ordem)}"
+            f"{TITULOS_SIMULADOR[nome]}\nlinha só melhor na própria coluna em "
+            f"{medida.estrita.sum()} de {len(ordem)}"
         )
-        imagem = desenhar_mapa(eixo, matriz, grupos, titulo)
-        fig.colorbar(imagem, ax=eixo, label="% acima do próprio plano", shrink=0.8)
+        imagem = desenhar_mapa(eixo, medida.matriz, grupos, titulo)
+        fig.colorbar(imagem, ax=eixo, label="iAUC a mais que o próprio plano", shrink=0.8)
     fig.suptitle("Plano de uma pessoa no perfil de outra (ordem: saudável, pré-diabetes, DM2)")
     gravar(fig, "matriz_personalizacao.png")
 
     fig, eixos = figura(2)
     rng = np.random.default_rng(SEMENTE)
-    for eixo, (medida, perda) in zip(eixos, perdas.items(), strict=True):
+    for eixo, (nome, medida) in zip(eixos, medidas.items(), strict=True):
+        perda = medida.perda_grupo
         for posicao, grupo in enumerate(GRUPOS):
             valores = perda.loc[perda["grupo"] == grupo, "perda"]
             eixo.boxplot(valores, positions=[posicao], widths=0.5, showfliers=False)
             espalhado = posicao + rng.uniform(-0.15, 0.15, len(valores))
             eixo.scatter(espalhado, valores, color=COR_GRUPO[grupo], zorder=3)
-        eixo.axhline(0, color=CINZA, linewidth=1)
         eixo.set_xticks(range(len(GRUPOS)), [NOMES_GRUPO[g] for g in GRUPOS])
-        eixo.set_ylabel("a mais com o plano do grupo")
-        eixo.set_title(TITULOS_MEDIDA[medida])
-        if medida == "aptidao":
-            # Sair da faixa de kcal custa dezenas de milhares e esmaga o resto na escala linear.
-            eixo.set_yscale("symlog", linthresh=LINEAR_ATE)
-    fig.suptitle("Quanto cada pessoa perde seguindo o plano do grupo no lugar do seu")
+        eixo.set_ylabel("iAUC prevista de D9 a mais (mg/dL·min)")
+        eixo.set_title(TITULOS_SIMULADOR[nome])
+    fig.suptitle("Quanto cada pessoa perde com o plano feito para os outros do grupo")
     gravar(fig, "perda_plano_grupo.png")
 
-    iauc, aptidao = acertos["iauc"], acertos["aptidao"]
-    matriz_aptidao = matrizes["aptidao"]
-    posicao_do_proprio = (matriz_aptidao < np.diag(matriz_aptidao)).sum(axis=0) + 1
+    kcal = cardapio["kcal"].to_numpy()[dias].sum(axis=1)
+    proprio = np.diag(medidas["perfil"].matriz)
     return (
-        f"personalização: a diagonal é a menor da coluna em {iauc.sum()} de {len(iauc)} colunas "
-        f"na iAUC ({iauc.mean():.0%}) e em {aptidao.sum()} ({aptidao.mean():.0%}) na aptidão, "
-        f"onde o próprio plano fica no pior caso em {posicao_do_proprio.max()}º; "
-        f"o plano do grupo muda a iAUC de D9 em mediana "
-        f"{perdas['iauc']['perda'].median():+.0f} mg/dL·min e a aptidão em "
-        f"{perdas['aptidao']['perda'].median():+.0f}"
+        f"personalização ({len(dias)} dias de D9 com {kcal.min():.0f} a {kcal.max():.0f} kcal e "
+        f"o mesmo piso de proteína para todos, caminhada de "
+        f"{LIMITES_CAMINHADA[1]:.0f} min, iAUC do próprio plano mediana {np.median(proprio):.0f}): "
+        f"{medidas['perfil'].resumo()}; com o perfil na média da população "
+        f"{medidas['cego'].resumo()}"
     )
 
 
@@ -651,18 +735,13 @@ def main() -> None:
     por_tipo = {"fold": [], "ag": []}
     for tarefa, saida in zip(lista, saidas, strict=True):
         por_tipo[tarefa[0]].append(saida.tabela)
-    planos = {
-        tarefa[2]: saida.plano
-        for tarefa, saida in zip(lista, saidas, strict=True)
-        if tarefa[:2] == ("ag", "com_travas")
-    }
     planos_d9, folds = pd.concat(por_tipo["ag"]), pd.concat(por_tipo["fold"])
 
     treino = treino_do_simulador(tabelas["refeicoes"], tabelas["perfis"].reset_index(drop=True))
     resumos = [
         analisar_sem_travas(planos_d9, treino),
         analisar_horario_livre(planos_d9),
-        analisar_personalizacao(planos, grupos),
+        analisar_personalizacao(grupos),
         analisar_interpolacao(folds),
     ]
     for resumo in resumos:

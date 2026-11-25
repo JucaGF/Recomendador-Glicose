@@ -32,28 +32,40 @@ def simulador_de(perfil: pd.Series):
     return simular
 
 
+def simulador_cego(perfil: pd.Series):
+    return ag.simulador_falso
+
+
 @pytest.fixture(scope="module")
-def matriz(sinteticos):
+def iauc(sinteticos):
     perfis, cardapio = sinteticos["perfis"], sinteticos["cardapio"]
-    planos = {
-        p: ag.rodar(CONFIG_PEQUENA, simulador_de(perfil), perfil, cardapio, SEMENTE).melhor
-        for p, perfil in perfis.iterrows()
+    dias = diferenciais.dias_viaveis(cardapio, perfis)
+    return {
+        nome: diferenciais.iauc_por_pessoa(dias, perfis, cardapio, de)
+        for nome, de in (("perfil", simulador_de), ("cego", simulador_cego))
     }
-    return diferenciais.matriz_personalizacao(planos, perfis, cardapio, simulador_de)
 
 
-def test_proprio_plano_e_o_melhor_em_cada_perfil(matriz):
-    diagonal = np.diag(matriz)
-    assert (diagonal <= matriz.min(axis=0).to_numpy()).all()
-    assert diferenciais.diagonal_minima(matriz).all()
-    assert (matriz.to_numpy() > diagonal).any(), "os planos precisam diferir entre as pessoas"
+def test_proprio_plano_e_o_melhor_em_cada_perfil(iauc):
+    matriz = diferenciais.matriz_personalizacao(iauc["perfil"])
+    assert diferenciais.diagonal_estrita(matriz).all()
+    assert (diferenciais.perda_de_outro_plano(matriz) > 0).all()
+    assert diferenciais.concordancia(iauc["perfil"]) < 1
 
 
-def test_plano_do_grupo_nunca_ganha_do_proprio(matriz):
+def test_simulador_que_ignora_o_perfil_nao_personaliza(iauc):
+    matriz = diferenciais.matriz_personalizacao(iauc["cego"])
     um_grupo_so = pd.Series("saudavel", index=matriz.index)
-    perdas = diferenciais.perda_plano_do_grupo(matriz, um_grupo_so)
-    assert (perdas["perda"] >= 0).all()
-    assert perdas["perda"].min() == 0, "o dono do plano do grupo não perde nada"
+    assert not diferenciais.diagonal_estrita(matriz).any()
+    assert (diferenciais.perda_de_outro_plano(matriz) == 0).all()
+    assert diferenciais.concordancia(iauc["cego"]) == pytest.approx(1.0)
+    assert (diferenciais.perda_plano_do_grupo(iauc["cego"], um_grupo_so)["perda"] == 0).all()
+
+
+def test_plano_feito_para_os_outros_custa_a_quem_sente_outro_macro(iauc):
+    um_grupo_so = pd.Series("saudavel", index=iauc["perfil"].index)
+    perdas = diferenciais.perda_plano_do_grupo(iauc["perfil"], um_grupo_so)
+    assert (perdas["perda"] > 0).all()
 
 
 def test_sem_travas_o_ag_sai_do_cardapio_onde_a_rede_erra(sinteticos):
