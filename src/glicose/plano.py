@@ -78,11 +78,6 @@ def macros_habito(perfil: pd.Series, cardapio: pd.DataFrame) -> np.ndarray:
 
 
 def horarios(pop: Populacao) -> np.ndarray:
-    """Decodifica os genes de intervalo em horas do dia.
-
-    O gene do café já é a hora do dia. Os do almoço e do jantar são horas desde a refeição
-    anterior, e o jantar usa só o intervalo que ainda cabe antes de HORA_MAXIMA_JANTAR.
-    """
     horario = np.empty_like(pop.intervalo)
     for j, (_, tipo) in enumerate(REFEICOES_PLANO):
         if tipo == "cafe":
@@ -127,11 +122,6 @@ def aleatoria(n: int, cardapio: pd.DataFrame, rng: np.random.Generator) -> Popul
 
 
 def habito(perfil: pd.Series, cardapio: pd.DataFrame) -> Populacao:
-    """Devolve o plano mais perto do hábito de D1 a D6.
-
-    Um tipo de refeição sem hábito, como o jantar do participante 032, recebe o prato mediano do
-    cardápio e o intervalo mediano do CGMacros.
-    """
     macros = macros_normalizados(cardapio)
     alvo = macros_habito(perfil, cardapio)
     horario = {tipo: perfil[f"horario_{tipo}"] for tipo in TIPOS_REFEICAO}

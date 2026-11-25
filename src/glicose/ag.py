@@ -21,9 +21,8 @@ from glicose.plano import (
     pratos_do_tipo,
 )
 
-# Recebe uma tabela no formato ENTRADA_SIMULADOR e devolve um valor por linha, na mesma ordem das
-# linhas. O AG usa a posição da saída para saber de que plano e de que refeição é cada iAUC, então
-# uma saída fora de ordem não é detectada e dá a iAUC ao plano errado.
+# Devolve um valor por linha da tabela ENTRADA_SIMULADOR, na mesma ordem. Uma saída fora de ordem
+# não é detectada e dá a iAUC ao plano errado.
 Simulador = Callable[[pd.DataFrame], np.ndarray]
 
 POSICOES_D9 = [j for j, (dia, _) in enumerate(REFEICOES_PLANO) if dia == 9]
@@ -31,8 +30,6 @@ DIA_9 = -1
 FAIXA_KCAL = 0.20
 PROTEINA_MINIMA = 0.80
 VIZINHOS_PRATO = 3
-# Com só os vizinhos mais próximos, cerca de 5% dos pratos do cardápio real não são vizinhos de
-# nenhum outro e a mutação nunca chega a eles.
 PROB_SALTO_PRATO = 0.1
 PROB_GENE_DO_PAI = 0.5
 SEMENTE_DADOS = 0
@@ -100,7 +97,6 @@ def penalidade_proteina(pop: Populacao, perfil: pd.Series, cardapio: pd.DataFram
 
 
 def distancia_habito(pop: Populacao, perfil: pd.Series, cardapio: pd.DataFrame) -> np.ndarray:
-    """Média, entre as refeições cujo tipo tem hábito, da distância aos macros do hábito."""
     alvo = macros_habito(perfil, cardapio)
     tem_habito = ~np.isnan(alvo).any(axis=1)
     macros_plano = macros_normalizados(cardapio)[indices_cardapio(pop, cardapio)]
@@ -116,10 +112,7 @@ def aptidao(
     cardapio: pd.DataFrame,
     lambdas: Lambdas,
 ) -> np.ndarray:
-    """Quanto menor a aptidão, melhor o plano, porque o AG minimiza.
-
-    As penalidades contam os dias D7 a D9, e a iAUC conta só D9.
-    """
+    """Menor é melhor, porque o AG minimiza. As penalidades contam D7 a D9, e a iAUC só D9."""
     return (
         iauc_d9(pop, simular, perfil, cardapio)
         + lambdas.kcal * penalidade_kcal(pop, perfil, cardapio)
@@ -128,7 +121,6 @@ def aptidao(
     )
 
 
-# O torneio da aula: sorteia `tamanho` indivíduos, e os 2 melhores viram pai e mãe.
 def torneio(aptidoes: np.ndarray, tamanho: int, rng: np.random.Generator) -> tuple[int, int]:
     candidatos = rng.choice(len(aptidoes), tamanho, replace=False)
     primeiro, segundo = candidatos[np.argsort(aptidoes[candidatos])[:2]]
