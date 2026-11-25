@@ -57,8 +57,8 @@ class ConfigAG:
     taxa_mutacao_gaussiana: float = 0.2
     sigma_relativo_inicial: float = 0.2
     sigma_relativo_final: float = 0.01
-    # A rede aprendeu o horário de pessoas que comem quase sempre na mesma hora, então o efeito
-    # do horário que ela prevê é confundido. Por padrão o plano mantém os horários do hábito.
+    # No CGMacros cada pessoa come quase sempre na mesma hora, então o efeito do horário que a
+    # rede prevê é confundido.
     horario_livre: bool = False
     lambdas: Lambdas = field(default_factory=Lambdas)
 

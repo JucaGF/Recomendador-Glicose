@@ -131,9 +131,6 @@ def aleatoria(n: int, cardapio: pd.DataFrame, rng: np.random.Generator) -> Popul
     )
 
 
-# O dia do hábito é o mais próximo dos macros médios de cada tipo entre os que respeitam kcal e
-# proteína, porque as penalidades medem a distância até esse hábito. Se nenhum dia do cardápio
-# respeita, fica o que menos viola.
 def habito(perfil: pd.Series, cardapio: pd.DataFrame) -> Populacao:
     macros = macros_normalizados(cardapio)
     alvo_do_dia = macros_habito(perfil, cardapio)[: len(TIPOS_REFEICAO)]
@@ -154,6 +151,7 @@ def habito(perfil: pd.Series, cardapio: pd.DataFrame) -> Populacao:
     violacao = fora_da_faixa_kcal(somar_no_dia(kcal), perfil) + falta_proteina(
         somar_no_dia(proteina), perfil
     )
+    # np.lexsort ordena pela última chave, então a violação decide antes da distância.
     melhor_dia = dias[:, np.lexsort((somar_no_dia(distancia), violacao))[0]]
 
     horario = {tipo: perfil[f"horario_{tipo}"] for tipo in TIPOS_REFEICAO}
