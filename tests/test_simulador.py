@@ -2,13 +2,17 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from glicose.baselines_modelo import Particao, media_participante
 from glicose.esquema import DIAS_HABITO, ENTRADA_SIMULADOR, conformar, dados_sinteticos
 from glicose.simulador import (
+    ALVOS,
+    MODELOS,
     ConfigRede,
     carregar,
     dividir,
     escolher_alvo,
     montar_atributos,
+    particao_do_estudo,
     resumir,
     salvar,
     separar_validacao,
@@ -22,6 +26,8 @@ N_REFEICOES_PLANO = 300
 CAMINHADA_MAXIMA = 30
 HORARIO_MAXIMO = 23.0
 CONFIG_RAPIDA = ConfigRede(epocas=5)
+IAUC_QUE_NAO_PODE_VAZAR = 1e6
+FIBRA_IMPOSSIVEL_G = 2000.0
 
 
 @pytest.fixture(scope="module")
@@ -29,9 +35,11 @@ def sinteticos():
     return dados_sinteticos(N_PARTICIPANTES, semente=0)
 
 
-@pytest.fixture(scope="module")
-def simulador(sinteticos):
-    return treinar_final(sinteticos["refeicoes"], sinteticos["perfis"], "iauc", CONFIG_RAPIDA)
+@pytest.fixture(scope="module", params=list(ALVOS))
+def simulador(sinteticos, request):
+    return treinar_final(
+        sinteticos["refeicoes"], sinteticos["perfis"], request.param, CONFIG_RAPIDA
+    )
 
 
 @pytest.fixture
@@ -71,17 +79,50 @@ def test_rede_erra_menos_que_a_media_quando_a_iauc_vem_do_carbo(sinteticos):
     sem_atividade = refeicoes["participante"] % 3 == 0
     refeicoes.loc[sem_atividade, "minutos_ativos_60"] = np.nan
 
-    previsoes = validar(refeicoes, sinteticos["perfis"])
-    tabela = resumir(previsoes)
-    rede = f"rede_{escolher_alvo(tabela)}"
+    tabela = resumir(validar(refeicoes, sinteticos["perfis"]))
 
-    assert np.isfinite(previsoes[rede]).all()
-    assert tabela.loc[rede, "mae_d7_d9"] < tabela.loc["media", "mae_d7_d9"]
+    for alvo in ALVOS:
+        assert tabela.loc[f"rede_{alvo}", "mae_d7_d9"] < tabela.loc["media", "mae_d7_d9"]
+
+
+def test_tabela_separa_os_dias_e_o_alvo_sai_de_d7_a_d9():
+    real = [100.0, 200.0, 100.0, 300.0]
+    erro_iauc = [10.0, -10.0, 100.0, -100.0]
+    erro_log1p = [20.0, -20.0, 0.0, 0.0]
+    previsoes = pd.DataFrame(
+        {
+            "dia": [7, 9, 1, 6],
+            "fold": [0, 1, 0, 1],
+            "iauc_dexcom": real,
+            **{nome: real for nome in MODELOS},
+            "rede_iauc": np.add(real, erro_iauc),
+            "rede_log1p": np.add(real, erro_log1p),
+        }
+    )
+    tabela = resumir(previsoes)
+
+    assert tabela.loc["rede_iauc", "mae_d7_d9"] == 10.0
+    assert tabela.loc["rede_iauc", "mae_d1_d6"] == 100.0
+    assert tabela.loc["rede_log1p", "mae_d7_d9"] == 20.0
+    assert tabela.loc["rede_log1p", "mae_d1_d6"] == 0.0
+    assert escolher_alvo(tabela) == "iauc"
+
+
+def test_media_do_participante_usa_so_d1_a_d6():
+    dias = np.arange(1, 10)
+    iauc = np.where(np.isin(dias, DIAS_HABITO), dias * 100.0, IAUC_QUE_NAO_PODE_VAZAR)
+    refeicoes = pd.DataFrame({"participante": 1, "dia": dias, "iauc_dexcom": iauc})
+    teste = Particao(refeicoes, pd.DataFrame(index=refeicoes.index))
+
+    previsto = media_participante(teste, teste)
+
+    np.testing.assert_allclose(previsto, np.mean([100, 200, 300, 400, 500, 600]))
 
 
 def test_prever_devolve_um_valor_por_refeicao_na_ordem_de_entrada(simulador, plano):
     perfil, refeicoes = plano
     previsto = simulador.prever(perfil, refeicoes)
+    assert previsto.shape == (N_REFEICOES_PLANO,)
 
     entradas = simulador.entradas(montar_atributos(refeicoes, pd.DataFrame([perfil])))
     referencia = simulador.para_iauc(simulador.modelo.predict(entradas, verbose=0))
@@ -90,6 +131,29 @@ def test_prever_devolve_um_valor_por_refeicao_na_ordem_de_entrada(simulador, pla
     embaralhada = np.random.default_rng(2).permutation(N_REFEICOES_PLANO)
     previsto_embaralhado = simulador.prever(perfil, refeicoes.iloc[embaralhada])
     np.testing.assert_allclose(previsto_embaralhado, previsto[embaralhada], atol=1e-4)
+
+
+def test_prever_monta_as_mesmas_entradas_que_o_treino(simulador, sinteticos):
+    estudo = particao_do_estudo(sinteticos["refeicoes"], sinteticos["perfis"])
+    perfil = sinteticos["perfis"].iloc[1]
+    pessoa = estudo.recortar(
+        (estudo.refeicoes["participante"] == perfil["participante"]).to_numpy()
+    )
+
+    np.testing.assert_allclose(
+        simulador.prever(perfil, conformar(pessoa.refeicoes, ENTRADA_SIMULADOR)),
+        simulador.prever_atributos(pessoa.atributos),
+    )
+
+
+def test_fibra_acima_do_carbo_vale_como_ausente(simulador, plano):
+    perfil, refeicoes = plano
+    impossivel = refeicoes.assign(fibra=FIBRA_IMPOSSIVEL_G)
+    ausente = refeicoes.assign(fibra=np.nan)
+
+    np.testing.assert_allclose(
+        simulador.prever(perfil, impossivel), simulador.prever(perfil, ausente)
+    )
 
 
 def test_simulador_gravado_e_lido_preve_o_mesmo(simulador, plano, tmp_path):
