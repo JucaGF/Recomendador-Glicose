@@ -18,6 +18,8 @@ N_REFEICOES = len(REFEICOES_PLANO)
 # 99% dos jantares reais do CGMacros acontecem antes de 22,9 horas (Apêndice A do plano).
 HORA_MAXIMA_JANTAR = 23.0
 LIMITES_CAMINHADA = (0.0, 30.0)
+FAIXA_KCAL = 0.20
+PROTEINA_MINIMA = 0.80
 
 
 @dataclass
@@ -77,6 +79,14 @@ def macros_habito(perfil: pd.Series, cardapio: pd.DataFrame) -> np.ndarray:
     return np.array(habito_por_refeicao, dtype=float) / escala
 
 
+def fora_da_faixa_kcal(kcal_por_dia: np.ndarray, perfil: pd.Series) -> np.ndarray:
+    return np.maximum(np.abs(kcal_por_dia / perfil["kcal_dia"] - 1) - FAIXA_KCAL, 0)
+
+
+def falta_proteina(proteina_por_dia: np.ndarray, perfil: pd.Series) -> np.ndarray:
+    return np.maximum(PROTEINA_MINIMA - proteina_por_dia / perfil["proteina_dia"], 0)
+
+
 def horarios(pop: Populacao) -> np.ndarray:
     horario = np.empty_like(pop.intervalo)
     for j, (_, tipo) in enumerate(REFEICOES_PLANO):
@@ -121,24 +131,46 @@ def aleatoria(n: int, cardapio: pd.DataFrame, rng: np.random.Generator) -> Popul
     )
 
 
+# O dia do hábito é o mais próximo dos macros médios de cada tipo entre os que respeitam kcal e
+# proteína, porque as penalidades medem a distância até esse hábito. Se nenhum dia do cardápio
+# respeita, fica o que menos viola.
 def habito(perfil: pd.Series, cardapio: pd.DataFrame) -> Populacao:
     macros = macros_normalizados(cardapio)
-    alvo = macros_habito(perfil, cardapio)
+    alvo_do_dia = macros_habito(perfil, cardapio)[: len(TIPOS_REFEICAO)]
+    distancia, kcal, proteina = [], [], []
+    for tipo, alvo in zip(TIPOS_REFEICAO, alvo_do_dia, strict=True):
+        pratos = pratos_do_tipo(cardapio, tipo)
+        do_tipo = macros[pratos]
+        alvo_tipo = np.median(do_tipo, axis=0) if np.isnan(alvo).any() else alvo
+        distancia.append(np.linalg.norm(do_tipo - alvo_tipo, axis=1))
+        kcal.append(cardapio["kcal"].to_numpy()[pratos])
+        proteina.append(cardapio["proteina"].to_numpy()[pratos])
+
+    dias = np.indices([len(d) for d in distancia]).reshape(len(TIPOS_REFEICAO), -1)
+
+    def somar_no_dia(por_tipo: list[np.ndarray]) -> np.ndarray:
+        return sum(valores[prato] for valores, prato in zip(por_tipo, dias, strict=True))
+
+    violacao = fora_da_faixa_kcal(somar_no_dia(kcal), perfil) + falta_proteina(
+        somar_no_dia(proteina), perfil
+    )
+    melhor_dia = dias[:, np.lexsort((somar_no_dia(distancia), violacao))[0]]
+
     horario = {tipo: perfil[f"horario_{tipo}"] for tipo in TIPOS_REFEICAO}
     intervalo_habito = {
         "cafe": horario["cafe"],
         "almoco": horario["almoco"] - horario["cafe"],
         "jantar": horario["jantar"] - horario["almoco"],
     }
-    prato_no_tipo = np.empty((1, N_REFEICOES), dtype=np.int64)
-    intervalo = np.empty((1, N_REFEICOES))
-    for j, (_, tipo) in enumerate(REFEICOES_PLANO):
-        do_tipo = macros[pratos_do_tipo(cardapio, tipo)]
-        alvo_refeicao = np.median(do_tipo, axis=0) if np.isnan(alvo[j]).any() else alvo[j]
-        prato_no_tipo[0, j] = np.argmin(np.linalg.norm(do_tipo - alvo_refeicao, axis=1))
-        mediana_intervalo = HORAS_DESDE_REFEICAO_ANTERIOR[tipo][0]
-        intervalo[0, j] = np.nan_to_num(intervalo_habito[tipo], nan=mediana_intervalo)
+    intervalo = np.array(
+        [
+            np.nan_to_num(intervalo_habito[tipo], nan=HORAS_DESDE_REFEICAO_ANTERIOR[tipo][0])
+            for _, tipo in REFEICOES_PLANO
+        ]
+    )
     minimos, maximos = limites_intervalo()
     return Populacao(
-        prato_no_tipo, np.clip(intervalo, minimos, maximos), np.zeros((1, N_REFEICOES))
+        np.tile(melhor_dia, len(DIAS_PLANO))[None, :],
+        np.clip(intervalo, minimos, maximos)[None, :],
+        np.zeros((1, N_REFEICOES)),
     )

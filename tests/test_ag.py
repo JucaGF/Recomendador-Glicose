@@ -97,6 +97,14 @@ def planos(*pratos_por_plano: list[int]) -> plano.Populacao:
     )
 
 
+def dias_viaveis(perfil, cardapio) -> plano.Populacao:
+    todos = planos(*[list(dia) * 3 for dia in itertools.product(range(3), repeat=3)])
+    viavel = (ag.penalidade_kcal(todos, perfil, cardapio) == 0) & (
+        ag.penalidade_proteina(todos, perfil, cardapio) == 0
+    )
+    return todos[np.nonzero(viavel)[0]]
+
+
 def distancia_em_desvios(tipo: str, de: int, para: int) -> float:
     todos_os_pratos = np.array([prato for pratos in PRATOS_PEQUENOS.values() for prato in pratos])
     desvio = todos_os_pratos.std(axis=0, ddof=1)
@@ -261,8 +269,10 @@ def test_distancia_habito_ignora_o_tipo_sem_habito():
 
 def test_habito_sem_jantar_usa_o_prato_mediano_e_o_intervalo_mediano():
     prato_mediano_do_jantar = 1
+    perfil = perfil_sem_jantar()
+    perfil["kcal_dia"] = 515.0 + 745.0 + 520.0
 
-    inicial = plano.habito(perfil_sem_jantar(), cardapio_pequeno())
+    inicial = plano.habito(perfil, cardapio_pequeno())
 
     assert inicial.prato_no_tipo[0].tolist() == [2, 2, prato_mediano_do_jantar] * 3
     intervalo_mediano = HORAS_DESDE_REFEICAO_ANTERIOR["jantar"][0]
@@ -290,3 +300,28 @@ def test_mutacao_de_prato_alcanca_o_prato_que_nao_e_vizinho_de_nenhum_outro():
 
     posicoes_jantar = [j for j, (_, tipo) in enumerate(plano.REFEICOES_PLANO) if tipo == "jantar"]
     assert isolado in mutados.prato_no_tipo[:, posicoes_jantar]
+
+
+def test_habito_e_o_dia_viavel_mais_perto_quando_o_prato_mais_perto_estoura_as_kcal():
+    cardapio, perfil = cardapio_pequeno(), perfil_pequeno()
+    pratos_mais_perto_em_macros = planos([2] * plano.N_REFEICOES)
+    assert ag.penalidade_kcal(pratos_mais_perto_em_macros, perfil, cardapio)[0] > 0
+
+    escolhido = plano.habito(perfil, cardapio)
+
+    assert ag.penalidade_kcal(escolhido, perfil, cardapio)[0] == 0
+    assert ag.penalidade_proteina(escolhido, perfil, cardapio)[0] == 0
+    menor_distancia_viavel = ag.distancia_habito(dias_viaveis(perfil, cardapio), perfil, cardapio)
+    assert ag.distancia_habito(escolhido, perfil, cardapio)[0] == pytest.approx(
+        menor_distancia_viavel.min()
+    )
+
+
+def test_sem_dia_viavel_o_habito_e_o_dia_que_menos_sai_da_faixa():
+    perfil = perfil_pequeno()
+    perfil["kcal_dia"] = 10_000.0
+    dia_de_mais_kcal = [2] * plano.N_REFEICOES
+
+    escolhido = plano.habito(perfil, cardapio_pequeno())
+
+    assert escolhido.prato_no_tipo[0].tolist() == dia_de_mais_kcal

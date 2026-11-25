@@ -12,6 +12,8 @@ from glicose.plano import (
     REFEICOES_PLANO,
     Populacao,
     aleatoria,
+    falta_proteina,
+    fora_da_faixa_kcal,
     habito,
     indices_cardapio,
     limites_intervalo,
@@ -27,8 +29,6 @@ Simulador = Callable[[pd.DataFrame], np.ndarray]
 
 POSICOES_D9 = [j for j, (dia, _) in enumerate(REFEICOES_PLANO) if dia == 9]
 DIA_9 = -1
-FAIXA_KCAL = 0.20
-PROTEINA_MINIMA = 0.80
 VIZINHOS_PRATO = 3
 PROB_SALTO_PRATO = 0.1
 PROB_GENE_DO_PAI = 0.5
@@ -87,13 +87,11 @@ def total_por_dia(pop: Populacao, cardapio: pd.DataFrame, coluna: str) -> np.nda
 
 
 def penalidade_kcal(pop: Populacao, perfil: pd.Series, cardapio: pd.DataFrame) -> np.ndarray:
-    desvio = np.abs(total_por_dia(pop, cardapio, "kcal") / perfil["kcal_dia"] - 1)
-    return np.maximum(desvio - FAIXA_KCAL, 0).sum(axis=1)
+    return fora_da_faixa_kcal(total_por_dia(pop, cardapio, "kcal"), perfil).sum(axis=1)
 
 
 def penalidade_proteina(pop: Populacao, perfil: pd.Series, cardapio: pd.DataFrame) -> np.ndarray:
-    fracao = total_por_dia(pop, cardapio, "proteina") / perfil["proteina_dia"]
-    return np.maximum(PROTEINA_MINIMA - fracao, 0).sum(axis=1)
+    return falta_proteina(total_por_dia(pop, cardapio, "proteina"), perfil).sum(axis=1)
 
 
 def distancia_habito(pop: Populacao, perfil: pd.Series, cardapio: pd.DataFrame) -> np.ndarray:
