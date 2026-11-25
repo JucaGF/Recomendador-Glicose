@@ -119,7 +119,78 @@ def test_frente_do_nsga2_igual_a_da_forca_bruta():
 
     for semente in range(3):
         resultado = nsga2.rodar(ag.ConfigAG(), ag.simulador_falso, perfil, cardapio, semente)
+        assert resultado.viavel
         assert resultado.objetivos == pytest.approx(esperada), semente
+
+
+def test_frente_sem_plano_viavel_diz_que_nao_e_viavel():
+    cardapio = montar_cardapio(PRATOS_PEQUENOS)
+    # O maior dia possível tem 515 + 745 + 750 = 2010 kcal, longe da faixa de 8000 a 12000.
+    perfil = perfil_pequeno()
+    perfil["kcal_dia"] = 10_000.0
+    maior_dia = plano.habito(perfil, cardapio)
+    maior_dia.prato_no_tipo[:] = 2
+
+    resultado = nsga2.rodar(
+        ag.ConfigAG(max_geracoes=50), ag.simulador_falso, perfil, cardapio, semente=0
+    )
+
+    assert not resultado.viavel
+    menor_violacao = nsga2.calcular_violacao(maior_dia, perfil, cardapio)[0]
+    violacao_frente = nsga2.calcular_violacao(resultado.frente, perfil, cardapio)
+    assert violacao_frente == pytest.approx(np.full(len(resultado.frente), menor_violacao))
+
+
+# Pontas em (0, 10) e (10, 0). Na escala de 0 a 1, (2, 2) vira (0,2, 0,2), o mais longe da reta
+# f1 + f2 = 1 entre as pontas.
+FRENTE_COM_JOELHO = np.array([[0, 10], [1, 5], [2, 2], [6, 1], [10, 0]], dtype=float)
+
+
+def test_ponto_de_joelho_de_uma_frente_calculada_a_mao():
+    assert nsga2.ponto_de_joelho(FRENTE_COM_JOELHO) == 2
+
+
+def test_ponto_de_joelho_nao_depende_da_unidade_dos_objetivos():
+    em_outra_unidade = FRENTE_COM_JOELHO * np.array([1000.0, 0.01])
+
+    assert nsga2.ponto_de_joelho(em_outra_unidade) == 2
+
+
+def test_ponto_de_joelho_de_frente_com_um_ponto_so():
+    assert nsga2.ponto_de_joelho(np.array([[3.0, 4.0]])) == 0
+
+
+# O jantar 9 fica longe de todos os outros, então não é um dos 3 vizinhos de nenhum prato. A
+# mutação só chega nele quando sorteia qualquer prato do tipo, e o cruzamento só troca pratos que
+# já estão na população. O carbo de 5 g o identifica na entrada do simulador.
+PRATOS_COM_ISOLADO = {
+    "cafe": [prato(30, 15, 10, 3), prato(35, 15, 10, 3)],
+    "almoco": [prato(50, 25, 15, 5), prato(55, 25, 15, 5)],
+    "jantar": [prato(50 + k, 30, 15, 4) for k in range(9)] + [prato(5, 60, 2, 1)],
+}
+
+
+def test_nsga2_chega_a_um_prato_que_nao_e_vizinho_de_ninguem():
+    cardapio = montar_cardapio(PRATOS_COM_ISOLADO)
+    habito = {tipo: {m: PRATOS_COM_ISOLADO[tipo][0][m] for m in MACROS} for tipo in TIPOS_REFEICAO}
+    perfil = montar_perfil(kcal_dia=1100.0, proteina_dia=60.0, habito_por_tipo=habito)
+    assert 9 not in ag.vizinhos_prato(cardapio)["jantar"]
+
+    config = ag.ConfigAG(tamanho_populacao=4, max_geracoes=100, taxa_mutacao_prato=0.5)
+    sementes_sem_o_prato_no_inicio = 0
+    for semente in range(10):
+        tem_o_prato = []
+
+        def simulador_espiao(refeicoes, tem_o_prato=tem_o_prato):
+            tem_o_prato.append((refeicoes["carbo"] == 5).any())
+            return ag.simulador_falso(refeicoes)
+
+        nsga2.rodar(config, simulador_espiao, perfil, cardapio, semente)
+
+        if not tem_o_prato[0]:
+            sementes_sem_o_prato_no_inicio += 1
+            assert any(tem_o_prato[1:]), semente
+    assert sementes_sem_o_prato_no_inicio > 0
 
 
 def test_busca_aleatoria_usa_exatamente_o_orcamento_do_ag():
