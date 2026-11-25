@@ -57,6 +57,9 @@ class ConfigAG:
     taxa_mutacao_gaussiana: float = 0.2
     sigma_relativo_inicial: float = 0.2
     sigma_relativo_final: float = 0.01
+    # A rede aprendeu o horário de pessoas que comem quase sempre na mesma hora, então o efeito
+    # do horário que ela prevê é confundido. Por padrão o plano mantém os horários do hábito.
+    horario_livre: bool = False
     lambdas: Lambdas = field(default_factory=Lambdas)
 
 
@@ -162,19 +165,24 @@ def mutacao_prato(
 
 
 def mutacao_gaussiana(
-    pop: Populacao, sigma: float, taxa: float, rng: np.random.Generator
+    pop: Populacao,
+    sigma: float,
+    taxa: float,
+    rng: np.random.Generator,
+    mutar_horario: bool = False,
 ) -> Populacao:
-    minimos, maximos = limites_intervalo()
-    caminhada_min, caminhada_max = LIMITES_CAMINHADA
     forma = pop.intervalo.shape
-    ruido_intervalo = rng.normal(0, sigma * (maximos - minimos), forma)
+    caminhada_min, caminhada_max = LIMITES_CAMINHADA
     ruido_caminhada = rng.normal(0, sigma * (caminhada_max - caminhada_min), forma)
-    intervalo = pop.intervalo + np.where(rng.random(forma) < taxa, ruido_intervalo, 0)
     caminhada = pop.caminhada + np.where(rng.random(forma) < taxa, ruido_caminhada, 0)
+    intervalo = pop.intervalo.copy()
+    if mutar_horario:
+        minimos, maximos = limites_intervalo()
+        ruido_intervalo = rng.normal(0, sigma * (maximos - minimos), forma)
+        intervalo += np.where(rng.random(forma) < taxa, ruido_intervalo, 0)
+        intervalo = np.clip(intervalo, minimos, maximos)
     return Populacao(
-        pop.prato_no_tipo.copy(),
-        np.clip(intervalo, minimos, maximos),
-        np.clip(caminhada, caminhada_min, caminhada_max),
+        pop.prato_no_tipo.copy(), intervalo, np.clip(caminhada, caminhada_min, caminhada_max)
     )
 
 
@@ -194,11 +202,17 @@ def populacao_inicial(
     vizinhos: dict[str, np.ndarray],
     rng: np.random.Generator,
 ) -> Populacao:
+    referencia = habito(perfil, cardapio)
     metade = config.tamanho_populacao // 2
-    copias = habito(perfil, cardapio)[np.zeros(config.tamanho_populacao - metade, dtype=int)]
+    aleatorios = aleatoria(metade, cardapio, rng)
+    if not config.horario_livre:
+        aleatorios.intervalo[:] = referencia.intervalo
+    copias = referencia[np.zeros(config.tamanho_populacao - metade, dtype=int)]
     copias = mutacao_prato(copias, vizinhos, config.taxa_mutacao_prato, rng)
-    copias = mutacao_gaussiana(copias, sigma(0, config), config.taxa_mutacao_gaussiana, rng)
-    return Populacao.juntar(aleatoria(metade, cardapio, rng), copias)
+    copias = mutacao_gaussiana(
+        copias, sigma(0, config), config.taxa_mutacao_gaussiana, rng, config.horario_livre
+    )
+    return Populacao.juntar(aleatorios, copias)
 
 
 def rodar(
@@ -224,7 +238,9 @@ def rodar(
             filhos.append(cruzamento(pop[pai], pop[mae], rng))
         filhos = mutacao_prato(Populacao.juntar(*filhos), vizinhos, config.taxa_mutacao_prato, rng)
         sigma_geracao = sigma(geracao, config)
-        filhos = mutacao_gaussiana(filhos, sigma_geracao, config.taxa_mutacao_gaussiana, rng)
+        filhos = mutacao_gaussiana(
+            filhos, sigma_geracao, config.taxa_mutacao_gaussiana, rng, config.horario_livre
+        )
         pop = Populacao.juntar(elite, filhos)
         aptidoes = aptidao(pop, simular, perfil, cardapio, config.lambdas)
         historico.append(

@@ -15,6 +15,8 @@ from glicose.esquema import (
     dados_sinteticos,
 )
 
+MUTACAO_GAUSSIANA_MAXIMA = {"taxa_mutacao_gaussiana": 1.0, "sigma_relativo_inicial": 1.0}
+
 PRATOS_PEQUENOS = {
     "cafe": [(20, 10, 5, 2), (45, 20, 10, 3), (70, 25, 15, 4)],
     "almoco": [(25, 15, 10, 4), (60, 30, 20, 6), (90, 40, 25, 8)],
@@ -97,6 +99,22 @@ def planos(*pratos_por_plano: list[int]) -> plano.Populacao:
     )
 
 
+def avaliados_pelo_ag(config: ag.ConfigAG, perfil, cardapio) -> tuple[pd.DataFrame, ag.Resultado]:
+    avaliados = []
+
+    def simulador_espiao(refeicoes):
+        avaliados.append(refeicoes)
+        return ag.simulador_falso(refeicoes)
+
+    resultado = ag.rodar(config, simulador_espiao, perfil, cardapio, semente=7)
+    assert len(avaliados) == len(resultado.historico)
+    return pd.concat(avaliados), resultado
+
+
+def horarios_por_plano(refeicoes: pd.DataFrame) -> np.ndarray:
+    return refeicoes["horario"].to_numpy().reshape(-1, plano.N_REFEICOES)
+
+
 def dias_viaveis(perfil, cardapio) -> plano.Populacao:
     todos = planos(*[list(dia) * 3 for dia in itertools.product(range(3), repeat=3)])
     viavel = (ag.penalidade_kcal(todos, perfil, cardapio) == 0) & (
@@ -125,27 +143,39 @@ def test_ag_acha_o_otimo_da_forca_bruta_em_10_sementes():
 
 def test_nenhum_individuo_avaliado_tem_menos_de_3_horas_entre_refeicoes_nem_jantar_apos_23h():
     dados = dados_sinteticos(3, semente=1)
-    config_mutacao_maxima = ag.ConfigAG(taxa_mutacao_gaussiana=1.0, sigma_relativo_inicial=1.0)
+    config = ag.ConfigAG(horario_livre=True, **MUTACAO_GAUSSIANA_MAXIMA)
 
     for _, perfil in dados["perfis"].iterrows():
-        avaliados = []
+        refeicoes, resultado = avaliados_pelo_ag(config, perfil, dados["cardapio"])
 
-        def simulador_espiao(refeicoes, avaliados=avaliados):
-            avaliados.append(refeicoes)
-            return ag.simulador_falso(refeicoes)
-
-        resultado = ag.rodar(
-            config_mutacao_maxima, simulador_espiao, perfil, dados["cardapio"], semente=7
-        )
-
-        refeicoes = pd.concat(avaliados)
         relogio = refeicoes["dia"].to_numpy() * 24 + refeicoes["horario"].to_numpy()
         intervalos = np.diff(relogio.reshape(-1, plano.N_REFEICOES), axis=1)
         assert intervalos.min() >= 3.0 - 1e-9
         jantares = refeicoes.loc[refeicoes["tipo"] == "jantar", "horario"]
         assert jantares.max() <= plano.HORA_MAXIMA_JANTAR
-        assert len(avaliados) == len(resultado.historico)
         assert len(refeicoes) == resultado.avaliacoes * plano.N_REFEICOES
+
+
+def test_por_padrao_todo_plano_avaliado_tem_os_horarios_do_habito():
+    dados = dados_sinteticos(3, semente=1)
+    config = ag.ConfigAG(max_geracoes=20, **MUTACAO_GAUSSIANA_MAXIMA)
+
+    for _, perfil in dados["perfis"].iterrows():
+        refeicoes, _ = avaliados_pelo_ag(config, perfil, dados["cardapio"])
+
+        do_habito = plano.horarios(plano.habito(perfil, dados["cardapio"]))
+        assert (horarios_por_plano(refeicoes) == do_habito).all()
+
+
+def test_com_horario_livre_cada_refeicao_e_avaliada_em_varios_horarios():
+    dados = dados_sinteticos(1, semente=1)
+    config = ag.ConfigAG(max_geracoes=20, horario_livre=True)
+
+    refeicoes, _ = avaliados_pelo_ag(config, dados["perfis"].iloc[0], dados["cardapio"])
+
+    por_plano = horarios_por_plano(refeicoes)
+    for j in range(plano.N_REFEICOES):
+        assert len(np.unique(por_plano[:, j])) > 1
 
 
 def test_cantos_dos_limites_decodificam_jantar_ate_23h_e_intervalos_de_3_horas_ou_mais():
