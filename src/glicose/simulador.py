@@ -1,6 +1,5 @@
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from dataclasses import dataclass
-from functools import partial
 from pathlib import Path
 
 import joblib
@@ -43,12 +42,19 @@ ATRIBUTOS = (
     "sexo_masculino",
     *(f"tipo_{tipo}" for tipo in TIPOS_REFEICAO),
 )
+COLUNA_CARBO = ATRIBUTOS.index("carbo")
+COLUNA_CAMINHADA = ATRIBUTOS.index("minutos_ativos_60")
+# A rede não lê as kcal. Elas quase repetem 4 × carbo + 4 × proteína + 9 × gordura, e no
+# contexto mais carbo mudaria a base e a sensibilidade pelas kcal. Aí a garantia de sinal
+# valeria só com as kcal paradas.
+FORA_DO_CONTEXTO = ("carbo", "minutos_ativos_60", "kcal")
+COLUNAS_CONTEXTO = [i for i, nome in enumerate(ATRIBUTOS) if nome not in FORA_DO_CONTEXTO]
 
 DIAS_ESTUDO = (*DIAS_HABITO, *DIAS_PLANO)
 CONJUNTOS = {"d7_d9": DIAS_PLANO, "d1_d6": DIAS_HABITO}
+MODELOS = ("rede", *BASELINES)
 N_FOLDS = 5
 SEMENTE = 0
-SEMENTES = (0, 1, 2)
 FRACAO_VALIDACAO = 0.2
 IAUC_MINIMA = 0.0
 
@@ -65,24 +71,12 @@ class ConfigRede:
     epocas: int = 300
     tamanho_lote: int = 32
     paciencia: int = 10
-
-
-@dataclass(frozen=True)
-class Alvo:
-    ida: Callable[[np.ndarray], np.ndarray]
-    volta: Callable[[np.ndarray], np.ndarray]
-
-
-ALVOS = {
-    "iauc": Alvo(ida=np.asarray, volta=np.asarray),
-    "log1p": Alvo(ida=np.log1p, volta=np.expm1),
-}
-MODELOS = (*(f"rede_{alvo}" for alvo in ALVOS), *BASELINES)
+    n_redes: int = 5
 
 
 def montar_atributos(refeicoes: pd.DataFrame, perfis: pd.DataFrame) -> pd.DataFrame:
     perfil = perfis.set_index("participante").loc[refeicoes["participante"]]
-    atributos = pd.DataFrame(
+    return pd.DataFrame(
         {
             **{coluna: refeicoes[coluna].to_numpy() for coluna in ATRIBUTOS_REFEICAO},
             **{coluna: perfil[coluna].to_numpy() for coluna in ATRIBUTOS_PERFIL},
@@ -92,21 +86,35 @@ def montar_atributos(refeicoes: pd.DataFrame, perfis: pd.DataFrame) -> pd.DataFr
         },
         index=refeicoes.index,
     ).astype("float64")
-    return atributos
 
 
-def construir_modelo(
-    n_entradas: int, n_camadas: int, n_neuronios: int, taxa_aprendizado: float, dropout: float
-) -> keras.Model:
-    modelo = keras.Sequential([keras.Input(shape=(n_entradas,))])
-    for _ in range(n_camadas):
-        modelo.add(keras.layers.Dense(n_neuronios, activation="relu"))
-        modelo.add(keras.layers.Dropout(dropout))
-    modelo.add(keras.layers.Dense(1))
-    # O notebook da aula usa mse. A nota aqui é o MAE, e a perda MAE errou menos que a mse em
-    # todas as sementes testadas.
-    modelo.compile(loss="mae", optimizer=keras.optimizers.SGD(taxa_aprendizado))
+def construir_modelo(config: ConfigRede, nome: str = "rede") -> keras.Model:
+    entrada = keras.Input(shape=(len(ATRIBUTOS),))
+    contexto = keras.ops.take(entrada, COLUNAS_CONTEXTO, axis=1)
+    carbo = keras.ops.take(entrada, [COLUNA_CARBO], axis=1)
+    caminhada = keras.ops.take(entrada, [COLUNA_CAMINHADA], axis=1)
+    oculta = contexto
+    for _ in range(config.n_camadas):
+        oculta = keras.layers.Dense(config.n_neuronios, activation="relu")(oculta)
+        # São poucas centenas de refeições por treino, e sem Dropout a rede decoraria essas
+        # refeições.
+        oculta = keras.layers.Dropout(config.dropout)(oculta)
+    base = keras.layers.Dense(1)(oculta)
+    # A softplus nunca é negativa. Assim mais carbo nunca baixa a previsão e mais caminhada
+    # nunca a sobe, para qualquer pessoa e qualquer refeição.
+    sensibilidade = keras.layers.Dense(1, activation="softplus")(oculta)
+    beneficio_caminhada = keras.layers.Dense(1, activation="softplus")(oculta)
+    saida = base + sensibilidade * carbo - beneficio_caminhada * caminhada
+    # Dentro de media_das_redes o Keras recusa duas redes com o mesmo nome.
+    modelo = keras.Model(entrada, saida, name=nome)
+    # O notebook usa mse. Aqui a nota é o MAE, e a rede treina com a mesma conta.
+    modelo.compile(loss="mae", optimizer=keras.optimizers.SGD(config.taxa_aprendizado))
     return modelo
+
+
+def media_das_redes(redes: list[keras.Model]) -> keras.Model:
+    entrada = keras.Input(shape=(len(ATRIBUTOS),))
+    return keras.Model(entrada, keras.layers.Average()([rede(entrada) for rede in redes]))
 
 
 @dataclass(frozen=True)
@@ -114,15 +122,17 @@ class Simulador:
     modelo: keras.Model
     preparo: Pipeline
     escala_alvo: StandardScaler
-    alvo: str
     iauc_maxima: float
 
     def entradas(self, atributos: pd.DataFrame) -> np.ndarray:
         return self.preparo.transform(atributos).astype("float32")
 
     def para_iauc(self, saida: np.ndarray) -> np.ndarray:
-        escalado = self.escala_alvo.inverse_transform(np.asarray(saida).reshape(-1, 1))
-        return np.clip(ALVOS[self.alvo].volta(escalado.ravel()), IAUC_MINIMA, self.iauc_maxima)
+        iauc = self.escala_alvo.inverse_transform(np.asarray(saida).reshape(-1, 1)).ravel()
+        # A saída é uma reta no carbo e na caminhada e nos extremos sai da faixa de iAUC do
+        # treino, onde não há dado. Sem o piso, o AG, que minimiza a previsão, buscaria iAUC
+        # negativa com pouco carbo e muita caminhada.
+        return np.clip(iauc, IAUC_MINIMA, self.iauc_maxima)
 
     def prever_atributos(self, atributos: pd.DataFrame) -> np.ndarray:
         return self.para_iauc(self.modelo.predict_on_batch(self.entradas(atributos)))
@@ -131,55 +141,55 @@ class Simulador:
         return self.prever_atributos(montar_atributos(refeicoes, pd.DataFrame([perfil])))
 
 
+def escalas(treino: Particao) -> tuple[Pipeline, StandardScaler]:
+    preparo = make_pipeline(SimpleImputer(strategy="median"), StandardScaler())
+    # Com a perda MAE o passo do SGD não cresce com o erro, e em mg/dL·min a sensibilidade
+    # teria de chegar a milhares. Sem padronizar o alvo, a rede para cedo e erra mais na
+    # validação cruzada.
+    escala_alvo = StandardScaler()
+    return preparo.fit(treino.atributos), escala_alvo.fit(treino.iauc.reshape(-1, 1))
+
+
+def sementes_das_redes(config: ConfigRede, semente: int) -> range:
+    return range(semente * config.n_redes, (semente + 1) * config.n_redes)
+
+
 def separar_validacao(treino: Particao, semente: int) -> tuple[np.ndarray, np.ndarray]:
     divisor = GroupShuffleSplit(n_splits=1, test_size=FRACAO_VALIDACAO, random_state=semente)
     return next(divisor.split(treino.atributos, groups=treino.refeicoes["participante"]))
 
 
-def treinar(
-    treino: Particao, alvo: str, config: ConfigRede, semente: int
-) -> tuple[Simulador, keras.callbacks.History]:
-    keras.utils.set_random_seed(semente)
-    preparo = make_pipeline(SimpleImputer(strategy="median"), StandardScaler())
-    preparo.fit(treino.atributos)
-    alvo_transformado = ALVOS[alvo].ida(treino.iauc).reshape(-1, 1)
-    escala_alvo = StandardScaler().fit(alvo_transformado)
-    modelo = construir_modelo(
-        len(ATRIBUTOS),
-        config.n_camadas,
-        config.n_neuronios,
-        config.taxa_aprendizado,
-        config.dropout,
-    )
-    simulador = Simulador(modelo, preparo, escala_alvo, alvo, float(treino.iauc.max()))
-    x = simulador.entradas(treino.atributos)
-    y = escala_alvo.transform(alvo_transformado)
-    ajuste, validacao = separar_validacao(treino, semente)
-    historico = modelo.fit(
-        x[ajuste],
-        y[ajuste],
-        validation_data=(x[validacao], y[validacao]),
-        epochs=config.epocas,
-        batch_size=config.tamanho_lote,
-        callbacks=[
-            keras.callbacks.EarlyStopping(patience=config.paciencia, restore_best_weights=True)
-        ],
-        verbose=0,
-    )
-    return simulador, historico
-
-
-def prever_rede(
-    treino: Particao, teste: Particao, alvo: str, config: ConfigRede, semente: int
-) -> np.ndarray:
-    simulador, _ = treinar(treino, alvo, config, semente)
-    return simulador.prever_atributos(teste.atributos)
+def treinar(treino: Particao, config: ConfigRede, semente: int) -> tuple[Simulador, list[int]]:
+    preparo, escala_alvo = escalas(treino)
+    x = preparo.transform(treino.atributos).astype("float32")
+    y = escala_alvo.transform(treino.iauc.reshape(-1, 1))
+    redes, melhores_epocas = [], []
+    for semente_rede in sementes_das_redes(config, semente):
+        keras.utils.set_random_seed(semente_rede)
+        rede = construir_modelo(config, nome=f"rede_{semente_rede}")
+        ajuste, validacao = separar_validacao(treino, semente_rede)
+        historico = rede.fit(
+            x[ajuste],
+            y[ajuste],
+            validation_data=(x[validacao], y[validacao]),
+            epochs=config.epocas,
+            batch_size=config.tamanho_lote,
+            callbacks=[
+                keras.callbacks.EarlyStopping(patience=config.paciencia, restore_best_weights=True)
+            ],
+            verbose=0,
+        )
+        redes.append(rede)
+        melhores_epocas.append(int(np.argmin(historico.history["val_loss"])) + 1)
+    simulador = Simulador(media_das_redes(redes), preparo, escala_alvo, float(treino.iauc.max()))
+    return simulador, melhores_epocas
 
 
 def particao_do_estudo(refeicoes: pd.DataFrame, perfis: pd.DataFrame) -> Particao:
     estudo = refeicoes[refeicoes["dia"].isin(DIAS_ESTUDO)]
     # A fibra faz parte do carbo total. Acima dele o registro está errado e vira valor ausente.
-    # A regra fica nos dados do estudo, porque no prever a fibra passaria a mudar com o carbo.
+    # A regra fica nos dados do estudo, porque no prever a fibra passaria a mudar com o carbo
+    # e quebraria a garantia de sinal.
     estudo = estudo.assign(fibra=estudo["fibra"].where(estudo["fibra"] <= estudo["carbo"]))
     return Particao(estudo, montar_atributos(estudo, perfis))
 
@@ -197,17 +207,15 @@ def validar(
     perfis: pd.DataFrame,
     config: ConfigRede = ConfigRede(),
     semente: int = SEMENTE,
-) -> pd.DataFrame:
-    redes = {
-        f"rede_{alvo}": partial(prever_rede, alvo=alvo, config=config, semente=semente)
-        for alvo in ALVOS
-    }
-    modelos = {**redes, **BASELINES}
-    partes = []
+) -> tuple[pd.DataFrame, list[int]]:
+    partes, melhores_epocas = [], []
     for fold, (treino, teste) in enumerate(dividir(refeicoes, perfis)):
-        previsto = {nome: modelo(treino, teste) for nome, modelo in modelos.items()}
+        simulador, epocas_fold = treinar(treino, config, semente)
+        melhores_epocas.extend(epocas_fold)
+        previsto = {nome: baseline(treino, teste) for nome, baseline in BASELINES.items()}
+        previsto["rede"] = simulador.prever_atributos(teste.atributos)
         partes.append(teste.refeicoes.assign(fold=fold, **previsto))
-    return pd.concat(partes, ignore_index=True)
+    return pd.concat(partes, ignore_index=True), melhores_epocas
 
 
 def resumir(previsoes: pd.DataFrame) -> pd.DataFrame:
@@ -224,30 +232,30 @@ def resumir(previsoes: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame.from_dict(linhas, orient="index")
 
 
-def mae_por(previsoes: pd.DataFrame, modelo: str, coluna: str) -> pd.Series:
+def mae_por(previsoes: pd.DataFrame, coluna: str) -> pd.Series:
     plano = previsoes[previsoes["dia"].isin(DIAS_PLANO)]
-    return (plano[ALVO] - plano[modelo]).abs().groupby(plano[coluna]).mean()
-
-
-def media_das_sementes(partes: list) -> pd.DataFrame | pd.Series:
-    return pd.concat(partes).groupby(level=0, sort=False).mean()
-
-
-def escolher_alvo(tabela: pd.DataFrame) -> str:
-    return min(ALVOS, key=lambda alvo: tabela.loc[f"rede_{alvo}", "mae_d7_d9"])
+    return (plano[ALVO] - plano["rede"]).abs().groupby(plano[coluna]).mean()
 
 
 def treinar_final(
     refeicoes: pd.DataFrame,
     perfis: pd.DataFrame,
-    alvo: str,
+    epocas: int,
     config: ConfigRede = ConfigRede(),
     semente: int = SEMENTE,
 ) -> Simulador:
     estudo = particao_do_estudo(refeicoes, perfis)
-    habito = estudo.refeicoes["dia"].isin(DIAS_HABITO).to_numpy()
-    simulador, _ = treinar(estudo.recortar(habito), alvo, config, semente)
-    return simulador
+    habito = estudo.recortar(estudo.refeicoes["dia"].isin(DIAS_HABITO).to_numpy())
+    preparo, escala_alvo = escalas(habito)
+    x = preparo.transform(habito.atributos).astype("float32")
+    y = escala_alvo.transform(habito.iauc.reshape(-1, 1))
+    redes = []
+    for semente_rede in sementes_das_redes(config, semente):
+        keras.utils.set_random_seed(semente_rede)
+        rede = construir_modelo(config, nome=f"rede_{semente_rede}")
+        rede.fit(x, y, epochs=epocas, batch_size=config.tamanho_lote, verbose=0)
+        redes.append(rede)
+    return Simulador(media_das_redes(redes), preparo, escala_alvo, float(habito.iauc.max()))
 
 
 def teste_d7_d9(
@@ -264,7 +272,6 @@ def salvar(simulador: Simulador, pasta: Path = ARTEFATOS) -> None:
     preparo = {
         "preparo": simulador.preparo,
         "escala_alvo": simulador.escala_alvo,
-        "alvo": simulador.alvo,
         "iauc_maxima": simulador.iauc_maxima,
     }
     joblib.dump(preparo, pasta / ARQUIVO_PREPARO)
@@ -279,23 +286,24 @@ def main() -> None:
     refeicoes = pd.read_parquet(ARTEFATOS / "refeicoes.parquet")
     perfis = pd.read_parquet(ARTEFATOS / "perfis.parquet")
 
-    validacoes = [validar(refeicoes, perfis, semente=semente) for semente in SEMENTES]
-    tabela = media_das_sementes([resumir(previsoes) for previsoes in validacoes])
-    alvo = escolher_alvo(tabela)
-    print(f"GroupKFold({N_FOLDS}) por participante, média de {len(SEMENTES)} sementes")
+    config = ConfigRede()
+    previsoes, melhores_epocas = validar(refeicoes, perfis, config)
+    print(f"GroupKFold({N_FOLDS}) por participante, conjunto de {config.n_redes} redes")
     print("MAE em mg/dL·min")
-    print(tabela.to_string(float_format="%.2f"))
-    print(f"\nalvo escolhido: {alvo}")
+    print(resumir(previsoes).to_string(float_format="%.2f"))
     for coluna in ("tipo", "grupo"):
-        print(f"\nMAE D7 a D9 da rede_{alvo} por {coluna}")
-        mae_coluna = [mae_por(previsoes, f"rede_{alvo}", coluna) for previsoes in validacoes]
-        print(media_das_sementes(mae_coluna).round(1).to_string())
+        print(f"\nMAE D7 a D9 da rede por {coluna}")
+        print(mae_por(previsoes, coluna).round(1).to_string())
 
-    simulador = treinar_final(refeicoes, perfis, alvo)
+    epocas = int(np.median(melhores_epocas))
+    simulador = treinar_final(refeicoes, perfis, epocas, config)
     salvar(simulador)
     teste = teste_d7_d9(simulador, refeicoes, perfis)
     mae_teste = (teste[ALVO] - teste["previsto"]).abs().mean()
-    print(f"\nmodelo final, MAE nas refeições de D7 a D9 dos mesmos participantes: {mae_teste:.1f}")
+    print(f"\nmodelo final: os {perfis['participante'].nunique()} participantes, {epocas} épocas")
+    print(f"a época é a mediana das {len(melhores_epocas)} paradas da validação cruzada")
+    print(f"MAE em D7 a D9 de quem esteve no treino: {mae_teste:.1f}")
+    print("Esse MAE mede pessoas conhecidas. Ele não se compara com o da validação cruzada.")
     print(f"gravado em {ARTEFATOS / ARQUIVO_MODELO} e {ARTEFATOS / ARQUIVO_PREPARO}")
 
 
