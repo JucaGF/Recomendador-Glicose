@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-from glicose.esquema import TIPOS_REFEICAO, dados_sinteticos
+from glicose.esquema import DIAS_PLANO, TIPOS_REFEICAO, dados_sinteticos
 from glicose.plano import (
     LIMITES_CAMINHADA,
     N_REFEICOES,
@@ -21,6 +21,8 @@ from glicose.plano import (
     pratos_do_tipo,
 )
 
+# Recebe uma tabela no formato ENTRADA_SIMULADOR e devolve um valor por linha, na mesma ordem das
+# linhas. O AG usa a posição da saída para saber de que plano e de que refeição é cada iAUC.
 Simulador = Callable[[pd.DataFrame], np.ndarray]
 
 POSICOES_D9 = [j for j, (dia, _) in enumerate(REFEICOES_PLANO) if dia == 9]
@@ -28,6 +30,7 @@ DIA_9 = -1
 FAIXA_KCAL = 0.20
 PROTEINA_MINIMA = 0.80
 VIZINHOS_PRATO = 3
+PROB_GENE_DO_PAI = 0.5
 SEMENTE_DADOS = 0
 
 
@@ -46,8 +49,6 @@ class Lambdas:
 class ConfigAG:
     tamanho_populacao: int = 100
     max_geracoes: int = 200
-    # Com 30 gerações sem melhora, o AG achou o ótimo da força bruta em 65 de 100 sementes.
-    # Com 120, achou em 100 de 100.
     paciencia: int = 120
     tamanho_torneio: int = 4
     elitismo: int = 2
@@ -61,7 +62,7 @@ class ConfigAG:
 @dataclass
 class Resultado:
     melhor: Populacao
-    fitness: float
+    aptidao: float
     historico: pd.DataFrame
     avaliacoes: int
 
@@ -70,14 +71,18 @@ def simulador_falso(refeicoes: pd.DataFrame) -> np.ndarray:
     return 1.5 * refeicoes["carbo"].to_numpy() - 10 * refeicoes["minutos_ativos_60"].to_numpy()
 
 
-def iauc_d9(pop: Populacao, simular: Simulador, perfil: pd.Series, cardapio) -> np.ndarray:
-    iauc = np.asarray(simular(para_refeicoes(pop, cardapio, perfil))).reshape(len(pop), N_REFEICOES)
-    return iauc[:, POSICOES_D9].sum(axis=1)
+def iauc_d9(
+    pop: Populacao, simular: Simulador, perfil: pd.Series, cardapio: pd.DataFrame
+) -> np.ndarray:
+    iauc_por_linha = np.asarray(simular(para_refeicoes(pop, cardapio, perfil)))
+    iauc_por_refeicao = iauc_por_linha.reshape(len(pop), N_REFEICOES)
+    return iauc_por_refeicao[:, POSICOES_D9].sum(axis=1)
 
 
 def total_por_dia(pop: Populacao, cardapio: pd.DataFrame, coluna: str) -> np.ndarray:
-    valores = cardapio[coluna].to_numpy()[indices_cardapio(pop, cardapio)]
-    return valores.reshape(len(pop), -1, len(TIPOS_REFEICAO)).sum(axis=2)
+    por_refeicao = cardapio[coluna].to_numpy()[indices_cardapio(pop, cardapio)]
+    por_dia_e_tipo = por_refeicao.reshape(len(pop), len(DIAS_PLANO), len(TIPOS_REFEICAO))
+    return por_dia_e_tipo.sum(axis=2)
 
 
 def penalidade_kcal(pop: Populacao, perfil: pd.Series, cardapio: pd.DataFrame) -> np.ndarray:
@@ -91,11 +96,23 @@ def penalidade_proteina(pop: Populacao, perfil: pd.Series, cardapio: pd.DataFram
 
 
 def distancia_habito(pop: Populacao, perfil: pd.Series, cardapio: pd.DataFrame) -> np.ndarray:
-    plano = macros_normalizados(cardapio)[indices_cardapio(pop, cardapio)]
-    return np.linalg.norm(plano - macros_habito(perfil, cardapio), axis=2).mean(axis=1)
+    macros_plano = macros_normalizados(cardapio)[indices_cardapio(pop, cardapio)]
+    diferenca = macros_plano - macros_habito(perfil, cardapio)
+    distancia_por_refeicao = np.linalg.norm(diferenca, axis=2)
+    return distancia_por_refeicao.mean(axis=1)
 
 
-def fitness(pop, simular, perfil, cardapio, lambdas: Lambdas) -> np.ndarray:
+def aptidao(
+    pop: Populacao,
+    simular: Simulador,
+    perfil: pd.Series,
+    cardapio: pd.DataFrame,
+    lambdas: Lambdas,
+) -> np.ndarray:
+    """Quanto menor a aptidão, melhor o plano, porque o AG minimiza.
+
+    As penalidades contam os dias D7 a D9, e a iAUC conta só D9.
+    """
     return (
         iauc_d9(pop, simular, perfil, cardapio)
         + lambdas.kcal * penalidade_kcal(pop, perfil, cardapio)
@@ -105,16 +122,16 @@ def fitness(pop, simular, perfil, cardapio, lambdas: Lambdas) -> np.ndarray:
 
 
 # O torneio da aula: sorteia `tamanho` indivíduos, e os 2 melhores viram pai e mãe.
-def torneio(aptidao: np.ndarray, tamanho: int, rng: np.random.Generator) -> tuple[int, int]:
-    candidatos = rng.choice(len(aptidao), tamanho, replace=False)
-    primeiro, segundo = candidatos[np.argsort(aptidao[candidatos])[:2]]
+def torneio(aptidoes: np.ndarray, tamanho: int, rng: np.random.Generator) -> tuple[int, int]:
+    candidatos = rng.choice(len(aptidoes), tamanho, replace=False)
+    primeiro, segundo = candidatos[np.argsort(aptidoes[candidatos])[:2]]
     return primeiro, segundo
 
 
 def cruzamento(pai: Populacao, mae: Populacao, rng: np.random.Generator) -> Populacao:
-    do_pai = rng.random(N_REFEICOES) < 0.5
+    do_pai = rng.random(N_REFEICOES) < PROB_GENE_DO_PAI
     return Populacao(
-        np.where(do_pai, pai.prato, mae.prato),
+        np.where(do_pai, pai.prato_no_tipo, mae.prato_no_tipo),
         np.where(do_pai, pai.intervalo, mae.intervalo),
         np.where(do_pai, pai.caminhada, mae.caminhada),
     )
@@ -125,23 +142,28 @@ def vizinhos_prato(cardapio: pd.DataFrame) -> dict[str, np.ndarray]:
     vizinhos = {}
     for tipo in TIPOS_REFEICAO:
         do_tipo = macros[pratos_do_tipo(cardapio, tipo)]
-        distancias = np.linalg.norm(do_tipo[:, None, :] - do_tipo[None, :, :], axis=2)
+        diferenca_entre_pares = do_tipo[:, None, :] - do_tipo[None, :, :]
+        distancias = np.linalg.norm(diferenca_entre_pares, axis=2)
         np.fill_diagonal(distancias, np.inf)
         quantos = min(VIZINHOS_PRATO, len(do_tipo) - 1)
         vizinhos[tipo] = np.argsort(distancias, axis=1)[:, :quantos]
     return vizinhos
 
 
-def mutacao_prato(pop: Populacao, vizinhos, taxa: float, rng: np.random.Generator) -> Populacao:
-    novo = pop[np.arange(len(pop))]
-    sorteados = rng.random(novo.prato.shape) < taxa
+def mutacao_prato(
+    pop: Populacao, vizinhos: dict[str, np.ndarray], taxa: float, rng: np.random.Generator
+) -> Populacao:
+    novo = pop.copiar()
+    sorteados = rng.random(novo.prato_no_tipo.shape) < taxa
     for i, j in zip(*np.nonzero(sorteados), strict=True):
         tipo = REFEICOES_PLANO[j][1]
-        novo.prato[i, j] = rng.choice(vizinhos[tipo][novo.prato[i, j]])
+        novo.prato_no_tipo[i, j] = rng.choice(vizinhos[tipo][novo.prato_no_tipo[i, j]])
     return novo
 
 
-def mutacao_gaussiana(pop: Populacao, sigma: float, taxa: float, rng) -> Populacao:
+def mutacao_gaussiana(
+    pop: Populacao, sigma: float, taxa: float, rng: np.random.Generator
+) -> Populacao:
     minimos, maximos = limites_intervalo()
     caminhada_min, caminhada_max = LIMITES_CAMINHADA
     forma = pop.intervalo.shape
@@ -150,7 +172,7 @@ def mutacao_gaussiana(pop: Populacao, sigma: float, taxa: float, rng) -> Populac
     intervalo = pop.intervalo + np.where(rng.random(forma) < taxa, ruido_intervalo, 0)
     caminhada = pop.caminhada + np.where(rng.random(forma) < taxa, ruido_caminhada, 0)
     return Populacao(
-        pop.prato.copy(),
+        pop.prato_no_tipo.copy(),
         np.clip(intervalo, minimos, maximos),
         np.clip(caminhada, caminhada_min, caminhada_max),
     )
@@ -162,10 +184,16 @@ def sigma(geracao: int, config: ConfigAG) -> float:
 
 
 def diversidade(pop: Populacao) -> float:
-    return np.mean([len(np.unique(pop.prato[:, j])) for j in range(N_REFEICOES)])
+    return float(np.mean([len(np.unique(pop.prato_no_tipo[:, j])) for j in range(N_REFEICOES)]))
 
 
-def populacao_inicial(config: ConfigAG, perfil, cardapio, vizinhos, rng) -> Populacao:
+def populacao_inicial(
+    config: ConfigAG,
+    perfil: pd.Series,
+    cardapio: pd.DataFrame,
+    vizinhos: dict[str, np.ndarray],
+    rng: np.random.Generator,
+) -> Populacao:
     metade = config.tamanho_populacao // 2
     copias = habito(perfil, cardapio)[np.zeros(config.tamanho_populacao - metade, dtype=int)]
     copias = mutacao_prato(copias, vizinhos, config.taxa_mutacao_prato, rng)
@@ -173,40 +201,48 @@ def populacao_inicial(config: ConfigAG, perfil, cardapio, vizinhos, rng) -> Popu
     return Populacao.juntar(aleatoria(metade, cardapio, rng), copias)
 
 
-def rodar(config: ConfigAG, simular: Simulador, perfil, cardapio, semente: int) -> Resultado:
+def rodar(
+    config: ConfigAG,
+    simular: Simulador,
+    perfil: pd.Series,
+    cardapio: pd.DataFrame,
+    semente: int,
+) -> Resultado:
     rng = np.random.default_rng(semente)
     vizinhos = vizinhos_prato(cardapio)
     pop = populacao_inicial(config, perfil, cardapio, vizinhos, rng)
-    aptidao = fitness(pop, simular, perfil, cardapio, config.lambdas)
-    historico = [(0, aptidao.min(), aptidao.mean(), sigma(0, config), diversidade(pop))]
-    melhor_ate_agora = aptidao.min()
+    aptidoes = aptidao(pop, simular, perfil, cardapio, config.lambdas)
+    historico = [(0, aptidoes.min(), aptidoes.mean(), sigma(0, config), diversidade(pop))]
+    melhor_ate_agora = aptidoes.min()
     geracoes_sem_melhora = 0
 
     for geracao in range(1, config.max_geracoes + 1):
-        elite = pop[np.argsort(aptidao)[: config.elitismo]]
+        elite = pop[np.argsort(aptidoes)[: config.elitismo]]
         filhos = []
         for _ in range(config.tamanho_populacao - config.elitismo):
-            pai, mae = torneio(aptidao, config.tamanho_torneio, rng)
+            pai, mae = torneio(aptidoes, config.tamanho_torneio, rng)
             filhos.append(cruzamento(pop[pai], pop[mae], rng))
         filhos = mutacao_prato(Populacao.juntar(*filhos), vizinhos, config.taxa_mutacao_prato, rng)
         sigma_geracao = sigma(geracao, config)
         filhos = mutacao_gaussiana(filhos, sigma_geracao, config.taxa_mutacao_gaussiana, rng)
         pop = Populacao.juntar(elite, filhos)
-        aptidao = fitness(pop, simular, perfil, cardapio, config.lambdas)
-        historico.append((geracao, aptidao.min(), aptidao.mean(), sigma_geracao, diversidade(pop)))
+        aptidoes = aptidao(pop, simular, perfil, cardapio, config.lambdas)
+        historico.append(
+            (geracao, aptidoes.min(), aptidoes.mean(), sigma_geracao, diversidade(pop))
+        )
 
-        if aptidao.min() < melhor_ate_agora:
-            melhor_ate_agora = aptidao.min()
+        if aptidoes.min() < melhor_ate_agora:
+            melhor_ate_agora = aptidoes.min()
             geracoes_sem_melhora = 0
         else:
             geracoes_sem_melhora += 1
         if geracoes_sem_melhora >= config.paciencia:
             break
 
-    melhor = np.argmin(aptidao)
+    melhor = np.argmin(aptidoes)
     return Resultado(
         melhor=pop[melhor],
-        fitness=float(aptidao[melhor]),
+        aptidao=float(aptidoes[melhor]),
         historico=pd.DataFrame(
             historico, columns=["geracao", "melhor", "media", "sigma", "diversidade"]
         ),
@@ -240,8 +276,8 @@ def main() -> None:
         ultima = resultado.historico["geracao"].iloc[-1]
         kcal_d9 = total_por_dia(resultado.melhor, dados["cardapio"], "kcal")[0, DIA_9]
         print(f"participante {perfil['participante']} ({perfil['grupo']}), semente {args.semente}")
-        print(f"fitness da geracao 0: {inicio:.1f}")
-        print(f"fitness final: {resultado.fitness:.1f} na geracao {ultima}")
+        print(f"aptidao da geracao 0: {inicio:.1f}")
+        print(f"aptidao final: {resultado.aptidao:.1f} na geracao {ultima}")
         print(f"avaliacoes: {resultado.avaliacoes}")
         print(f"kcal de D9: {kcal_d9:.0f} ({kcal_d9 / perfil['kcal_dia']:.0%} do habito)")
         print(mostrar_plano(resultado.melhor, perfil, dados["cardapio"]))

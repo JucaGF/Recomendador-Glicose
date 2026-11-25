@@ -66,24 +66,24 @@ def forca_bruta(perfil, cardapio, lambdas) -> tuple[np.ndarray, float]:
         np.tile(minimos, (len(combinacoes), 1)),
         np.full(combinacoes.shape, plano.LIMITES_CAMINHADA[1]),
     )
-    aptidao = ag.fitness(todos, ag.simulador_falso, perfil, cardapio, lambdas)
-    melhor = np.argmin(aptidao)
-    return combinacoes[melhor], aptidao[melhor]
+    aptidoes = ag.aptidao(todos, ag.simulador_falso, perfil, cardapio, lambdas)
+    melhor = np.argmin(aptidoes)
+    return combinacoes[melhor], aptidoes[melhor]
 
 
 def pratos_d9(pop: plano.Populacao) -> list[int]:
-    return pop.prato[0, ag.POSICOES_D9].tolist()
+    return pop.prato_no_tipo[0, ag.POSICOES_D9].tolist()
 
 
 def test_ag_acha_o_otimo_da_forca_bruta_em_10_sementes():
     cardapio, perfil = cardapio_pequeno(), perfil_pequeno()
     config = ag.ConfigAG()
-    otimo, fitness_otima = forca_bruta(perfil, cardapio, config.lambdas)
+    otimo, aptidao_otima = forca_bruta(perfil, cardapio, config.lambdas)
 
     for semente in range(10):
         resultado = ag.rodar(config, ag.simulador_falso, perfil, cardapio, semente)
         assert pratos_d9(resultado.melhor) == otimo[ag.POSICOES_D9].tolist(), semente
-        assert resultado.fitness == pytest.approx(fitness_otima, abs=1.0), semente
+        assert resultado.aptidao == pytest.approx(aptidao_otima, abs=1.0), semente
 
 
 def test_nenhum_individuo_tem_menos_de_3_horas_entre_refeicoes():

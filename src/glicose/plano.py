@@ -19,28 +19,30 @@ LIMITES_HORARIO = {
 LIMITES_CAMINHADA = (0.0, 30.0)
 
 
-# prato é a posição entre os pratos do mesmo tipo, e não a linha do cardápio.
 @dataclass
 class Populacao:
-    prato: np.ndarray
+    prato_no_tipo: np.ndarray
     intervalo: np.ndarray
     caminhada: np.ndarray
 
     def __len__(self) -> int:
-        return len(self.prato)
+        return len(self.prato_no_tipo)
 
-    def __getitem__(self, indices) -> "Populacao":
+    def __getitem__(self, indices: int | np.ndarray) -> "Populacao":
         indices = np.atleast_1d(indices)
         return Populacao(
-            self.prato[indices].copy(),
+            self.prato_no_tipo[indices].copy(),
             self.intervalo[indices].copy(),
             self.caminhada[indices].copy(),
         )
 
+    def copiar(self) -> "Populacao":
+        return Populacao(self.prato_no_tipo.copy(), self.intervalo.copy(), self.caminhada.copy())
+
     @staticmethod
     def juntar(*partes: "Populacao") -> "Populacao":
         return Populacao(
-            np.concatenate([p.prato for p in partes]),
+            np.concatenate([p.prato_no_tipo for p in partes]),
             np.concatenate([p.intervalo for p in partes]),
             np.concatenate([p.caminhada for p in partes]),
         )
@@ -57,9 +59,9 @@ def pratos_do_tipo(cardapio: pd.DataFrame, tipo: str) -> np.ndarray:
 
 
 def indices_cardapio(pop: Populacao, cardapio: pd.DataFrame) -> np.ndarray:
-    indices = np.empty_like(pop.prato)
+    indices = np.empty_like(pop.prato_no_tipo)
     for j, (_, tipo) in enumerate(REFEICOES_PLANO):
-        indices[:, j] = pratos_do_tipo(cardapio, tipo)[pop.prato[:, j]]
+        indices[:, j] = pratos_do_tipo(cardapio, tipo)[pop.prato_no_tipo[:, j]]
     return indices
 
 
@@ -71,7 +73,7 @@ def macros_normalizados(cardapio: pd.DataFrame) -> np.ndarray:
 def macros_habito(perfil: pd.Series, cardapio: pd.DataFrame) -> np.ndarray:
     escala = cardapio[list(MACROS)].std().to_numpy()
     habito_por_refeicao = [[perfil[f"{m}_{tipo}"] for m in MACROS] for _, tipo in REFEICOES_PLANO]
-    return np.array(habito_por_refeicao) / escala
+    return np.array(habito_por_refeicao, dtype=float) / escala
 
 
 def horarios(pop: Populacao) -> np.ndarray:
@@ -103,12 +105,12 @@ def para_refeicoes(pop: Populacao, cardapio: pd.DataFrame, perfil: pd.Series) ->
 
 
 def aleatoria(n: int, cardapio: pd.DataFrame, rng: np.random.Generator) -> Populacao:
-    prato = np.empty((n, N_REFEICOES), dtype=np.int64)
+    prato_no_tipo = np.empty((n, N_REFEICOES), dtype=np.int64)
     for j, (_, tipo) in enumerate(REFEICOES_PLANO):
-        prato[:, j] = rng.integers(0, len(pratos_do_tipo(cardapio, tipo)), n)
+        prato_no_tipo[:, j] = rng.integers(0, len(pratos_do_tipo(cardapio, tipo)), n)
     minimos, maximos = limites_intervalo()
     return Populacao(
-        prato,
+        prato_no_tipo,
         rng.uniform(minimos, maximos, (n, N_REFEICOES)),
         rng.uniform(*LIMITES_CAMINHADA, (n, N_REFEICOES)),
     )
@@ -123,11 +125,13 @@ def habito(perfil: pd.Series, cardapio: pd.DataFrame) -> Populacao:
         "almoco": horario["almoco"] - horario["cafe"],
         "jantar": horario["jantar"] - horario["almoco"],
     }
-    prato = np.empty((1, N_REFEICOES), dtype=np.int64)
+    prato_no_tipo = np.empty((1, N_REFEICOES), dtype=np.int64)
     intervalo = np.empty((1, N_REFEICOES))
     for j, (_, tipo) in enumerate(REFEICOES_PLANO):
         distancias = np.linalg.norm(macros[pratos_do_tipo(cardapio, tipo)] - alvo[j], axis=1)
-        prato[0, j] = np.argmin(distancias)
+        prato_no_tipo[0, j] = np.argmin(distancias)
         intervalo[0, j] = intervalo_habito[tipo]
     minimos, maximos = limites_intervalo()
-    return Populacao(prato, np.clip(intervalo, minimos, maximos), np.zeros((1, N_REFEICOES)))
+    return Populacao(
+        prato_no_tipo, np.clip(intervalo, minimos, maximos), np.zeros((1, N_REFEICOES))
+    )
