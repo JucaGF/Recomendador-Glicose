@@ -5,7 +5,15 @@ import pandas as pd
 import pytest
 
 from glicose import ag, plano
-from glicose.esquema import CARDAPIO, ENTRADA_SIMULADOR, TIPOS_REFEICAO, conformar, dados_sinteticos
+from glicose.esquema import (
+    CARDAPIO,
+    ENTRADA_SIMULADOR,
+    HORAS_DESDE_REFEICAO_ANTERIOR,
+    MACROS,
+    TIPOS_REFEICAO,
+    conformar,
+    dados_sinteticos,
+)
 
 PRATOS_PEQUENOS = {
     "cafe": [(20, 10, 5, 2), (45, 20, 10, 3), (70, 25, 15, 4)],
@@ -73,6 +81,27 @@ def forca_bruta(perfil, cardapio, lambdas) -> tuple[np.ndarray, float]:
 
 def pratos_d9(pop: plano.Populacao) -> list[int]:
     return pop.prato_no_tipo[0, ag.POSICOES_D9].tolist()
+
+
+def perfil_sem_jantar() -> pd.Series:
+    perfil = perfil_pequeno()
+    perfil[[f"{coluna}_jantar" for coluna in (*MACROS, "horario")]] = np.nan
+    return perfil
+
+
+def planos(*pratos_por_plano: list[int]) -> plano.Populacao:
+    minimos, _ = plano.limites_intervalo()
+    forma = (len(pratos_por_plano), plano.N_REFEICOES)
+    return plano.Populacao(
+        np.array(pratos_por_plano), np.broadcast_to(minimos, forma).copy(), np.zeros(forma)
+    )
+
+
+def distancia_em_desvios(tipo: str, de: int, para: int) -> float:
+    todos_os_pratos = np.array([prato for pratos in PRATOS_PEQUENOS.values() for prato in pratos])
+    desvio = todos_os_pratos.std(axis=0, ddof=1)
+    diferenca = np.subtract(PRATOS_PEQUENOS[tipo][de], PRATOS_PEQUENOS[tipo][para])
+    return float(np.linalg.norm(diferenca / desvio))
 
 
 def test_ag_acha_o_otimo_da_forca_bruta_em_10_sementes():
@@ -172,3 +201,36 @@ def test_habito_representa_os_horarios_do_participante():
         horarios = plano.horarios(plano.habito(perfil, dados["cardapio"]))[0, :3]
         esperado = [perfil[f"horario_{tipo}"] for tipo in TIPOS_REFEICAO]
         assert horarios == pytest.approx(esperado)
+
+
+def test_distancia_habito_ignora_o_tipo_sem_habito():
+    habito_de_cafe_e_almoco = [2] * plano.N_REFEICOES
+    jantar_d9_trocado = [2, 2, 2, 2, 2, 2, 2, 2, 1]
+    cafe_d9_trocado = [2, 2, 2, 2, 2, 2, 1, 2, 2]
+
+    distancias = ag.distancia_habito(
+        planos(habito_de_cafe_e_almoco, jantar_d9_trocado, cafe_d9_trocado),
+        perfil_sem_jantar(),
+        cardapio_pequeno(),
+    )
+
+    assert distancias == pytest.approx([0.0, 0.0, distancia_em_desvios("cafe", 2, 1) / 6])
+
+
+def test_habito_sem_jantar_usa_o_prato_mediano_e_o_intervalo_mediano():
+    prato_mediano_do_jantar = 1
+
+    inicial = plano.habito(perfil_sem_jantar(), cardapio_pequeno())
+
+    assert inicial.prato_no_tipo[0].tolist() == [2, 2, prato_mediano_do_jantar] * 3
+    intervalo_mediano = HORAS_DESDE_REFEICAO_ANTERIOR["jantar"][0]
+    assert plano.horarios(inicial)[0, :3] == pytest.approx([8.0, 12.5, 12.5 + intervalo_mediano])
+
+
+def test_ag_termina_com_aptidao_finita_para_perfil_sem_jantar():
+    resultado = ag.rodar(
+        ag.ConfigAG(), ag.simulador_falso, perfil_sem_jantar(), cardapio_pequeno(), semente=0
+    )
+
+    assert np.isfinite(resultado.aptidao)
+    assert np.isfinite(resultado.historico[["melhor", "media"]].to_numpy()).all()

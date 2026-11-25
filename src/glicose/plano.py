@@ -127,6 +127,11 @@ def aleatoria(n: int, cardapio: pd.DataFrame, rng: np.random.Generator) -> Popul
 
 
 def habito(perfil: pd.Series, cardapio: pd.DataFrame) -> Populacao:
+    """Devolve o plano mais perto do hábito de D1 a D6.
+
+    Um tipo de refeição sem hábito, como o jantar do participante 032, recebe o prato mediano do
+    cardápio e o intervalo mediano do CGMacros.
+    """
     macros = macros_normalizados(cardapio)
     alvo = macros_habito(perfil, cardapio)
     horario = {tipo: perfil[f"horario_{tipo}"] for tipo in TIPOS_REFEICAO}
@@ -138,9 +143,11 @@ def habito(perfil: pd.Series, cardapio: pd.DataFrame) -> Populacao:
     prato_no_tipo = np.empty((1, N_REFEICOES), dtype=np.int64)
     intervalo = np.empty((1, N_REFEICOES))
     for j, (_, tipo) in enumerate(REFEICOES_PLANO):
-        distancias = np.linalg.norm(macros[pratos_do_tipo(cardapio, tipo)] - alvo[j], axis=1)
-        prato_no_tipo[0, j] = np.argmin(distancias)
-        intervalo[0, j] = intervalo_habito[tipo]
+        do_tipo = macros[pratos_do_tipo(cardapio, tipo)]
+        alvo_refeicao = np.median(do_tipo, axis=0) if np.isnan(alvo[j]).any() else alvo[j]
+        prato_no_tipo[0, j] = np.argmin(np.linalg.norm(do_tipo - alvo_refeicao, axis=1))
+        mediana_intervalo = HORAS_DESDE_REFEICAO_ANTERIOR[tipo][0]
+        intervalo[0, j] = np.nan_to_num(intervalo_habito[tipo], nan=mediana_intervalo)
     minimos, maximos = limites_intervalo()
     return Populacao(
         prato_no_tipo, np.clip(intervalo, minimos, maximos), np.zeros((1, N_REFEICOES))

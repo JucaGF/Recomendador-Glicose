@@ -96,8 +96,11 @@ def penalidade_proteina(pop: Populacao, perfil: pd.Series, cardapio: pd.DataFram
 
 
 def distancia_habito(pop: Populacao, perfil: pd.Series, cardapio: pd.DataFrame) -> np.ndarray:
+    """Média, entre as refeições cujo tipo tem hábito, da distância aos macros do hábito."""
+    alvo = macros_habito(perfil, cardapio)
+    tem_habito = ~np.isnan(alvo).any(axis=1)
     macros_plano = macros_normalizados(cardapio)[indices_cardapio(pop, cardapio)]
-    diferenca = macros_plano - macros_habito(perfil, cardapio)
+    diferenca = macros_plano[:, tem_habito] - alvo[tem_habito]
     distancia_por_refeicao = np.linalg.norm(diferenca, axis=2)
     return distancia_por_refeicao.mean(axis=1)
 
