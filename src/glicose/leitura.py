@@ -6,7 +6,6 @@ COLUNAS = {
     "Dexcom GL": "dexcom",
     "Libre GL": "libre",
     "METs": "mets",
-    "Intensity": "intensidade",
     "Meal Type": "refeicao",
     "Carbs": "carbo",
     "Protein": "proteina",
@@ -21,7 +20,7 @@ LANCHE = "lanche"
 
 PARTICIPANTES_EXCLUIDOS = {7: "grade de 3 minutos no lugar de 1 minuto"}
 
-# O CSV guarda METs multiplicados por 10: o repouso aparece como 10.
+# O CSV guarda METs multiplicados por 10, e o repouso aparece como 10.
 ESCALA_METS = 10
 
 # Limites de HbA1c da American Diabetes Association, em %.
@@ -41,13 +40,13 @@ REFEICOES_MINIMAS_DIA = 2
 
 def participantes() -> list[int]:
     pastas = sorted((pasta_dados() / "CGMacros").glob("CGMacros-0*"))
-    ids = [int(p.name.removeprefix("CGMacros-")) for p in pastas if p.is_dir()]
-    return [pid for pid in ids if pid not in PARTICIPANTES_EXCLUIDOS]
+    ids = [int(pasta.name.removeprefix("CGMacros-")) for pasta in pastas if pasta.is_dir()]
+    return [participante for participante in ids if participante not in PARTICIPANTES_EXCLUIDOS]
 
 
 def ler_grupos() -> pd.Series:
-    bio = pd.read_csv(pasta_dados() / "CGMacros" / "bio.csv")
-    a1c = bio.set_index("subject")["A1c PDL (Lab)"]
+    biometria = pd.read_csv(pasta_dados() / "CGMacros" / "bio.csv")
+    a1c = biometria.set_index("subject")["A1c PDL (Lab)"]
     grupos = pd.cut(
         a1c,
         [-float("inf"), A1C_PRE_DIABETES, A1C_DM2, float("inf")],
@@ -57,16 +56,16 @@ def ler_grupos() -> pd.Series:
     return grupos.astype("str").rename("grupo")
 
 
-def ler_participante(pid: int) -> pd.DataFrame:
-    pasta = pasta_dados() / "CGMacros" / f"CGMacros-{pid:03d}"
-    bruto = pd.read_csv(pasta / f"CGMacros-{pid:03d}.csv")
+def ler_participante(participante: int) -> pd.DataFrame:
+    pasta = pasta_dados() / "CGMacros" / f"CGMacros-{participante:03d}"
+    bruto = pd.read_csv(pasta / f"CGMacros-{participante:03d}.csv")
     bruto.columns = bruto.columns.str.strip()
     tabela = bruto.reindex(columns=list(COLUNAS)).rename(columns=COLUNAS)
     tabela.index = pd.DatetimeIndex(pd.to_datetime(bruto["Timestamp"]), name="instante")
     tabela = tabela.asfreq("min")
     tabela["mets"] = tabela["mets"] / ESCALA_METS
     tabela["refeicao"] = tabela["refeicao"].map(_tipo_refeicao, na_action="ignore")
-    tabela["foto"] = (f"CGMacros/CGMacros-{pid:03d}/" + tabela["foto"]).where(
+    tabela["foto"] = (f"CGMacros/CGMacros-{participante:03d}/" + tabela["foto"]).where(
         tabela["refeicao"].notna()
     )
     return tabela
@@ -85,19 +84,26 @@ def leituras_nativas(serie: pd.Series) -> pd.Series:
     usa o passo mais comum entre cotovelos, e cada trecho contínuo usa a fase dos seus, para
     recuperar todas.
     """
-    minuto = (serie.index - serie.index[0]) // pd.Timedelta(minutes=1)
-    minuto = pd.Series(minuto, index=serie.index)
-    presente = serie.notna()
-    trecho = presente.ne(presente.shift()).cumsum()
-    segunda = serie.diff().diff().shift(-1)
-    cotovelos = minuto[segunda.abs() > TOLERANCIA_COTOVELO]
-    trecho_cotovelo = trecho[cotovelos.index]
-    passos = cotovelos.diff()[trecho_cotovelo.eq(trecho_cotovelo.shift())]
-    if passos.empty:
+    minuto = pd.Series((serie.index - serie.index[0]) // pd.Timedelta(minutes=1), index=serie.index)
+    tem_valor = serie.notna()
+    numero_do_trecho = tem_valor.ne(tem_valor.shift()).cumsum()
+    segunda_diferenca = serie.diff().diff().shift(-1)
+    e_cotovelo = segunda_diferenca.abs() > TOLERANCIA_COTOVELO
+    minuto_do_cotovelo = minuto[e_cotovelo]
+    trecho_do_cotovelo = numero_do_trecho[e_cotovelo]
+    mesmo_trecho_do_anterior = trecho_do_cotovelo.eq(trecho_do_cotovelo.shift())
+    distancia_entre_cotovelos = minuto_do_cotovelo.diff()[mesmo_trecho_do_anterior]
+    if distancia_entre_cotovelos.empty:
         return serie.iloc[:0]
-    passo = int(passos.mode().min())
-    fase_por_trecho = (cotovelos % passo).groupby(trecho_cotovelo).agg(lambda f: f.mode().min())
-    return serie[presente & (minuto % passo == trecho.map(fase_por_trecho))]
+    passo = mais_comum(distancia_entre_cotovelos)
+    fase_do_cotovelo = minuto_do_cotovelo % passo
+    fase_por_trecho = fase_do_cotovelo.groupby(trecho_do_cotovelo).agg(mais_comum)
+    fase_do_minuto = numero_do_trecho.map(fase_por_trecho)
+    return serie[tem_valor & (minuto % passo == fase_do_minuto)]
+
+
+def mais_comum(valores: pd.Series) -> int:
+    return int(valores.mode().min())
 
 
 def dias_validos(tabela: pd.DataFrame) -> pd.DataFrame:
