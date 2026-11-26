@@ -1,0 +1,4 @@
+data/
+artefatos/
+.venv/
+__pycache__/
