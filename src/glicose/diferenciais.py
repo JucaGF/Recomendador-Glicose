@@ -690,7 +690,7 @@ def analisar_interpolacao(previsoes: pd.DataFrame) -> str:
     histograma.axvline(p90, color="k", linestyle="--", label=f"percentil 90 {p90:.1f}")
     histograma.set_xlabel("glicose pré-refeição da grade menos a nativa (mg/dL)")
     histograma.set_ylabel("refeições")
-    histograma.set_title("Glicose pré-refeição: a grade quase não difere das leituras nativas")
+    histograma.set_title("Glicose pré: grade quase igual às leituras nativas")
     histograma.legend()
     gravar(fig, "interpolacao_glicose_pre.png")
 
