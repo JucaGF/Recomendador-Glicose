@@ -1,3 +1,11 @@
+"""Cardápio de pratos reais que o algoritmo genético pode recomendar.
+
+Filtra os registros com macros incoerentes e junta os pratos que só diferem por
+erro de digitação.
+
+Autores: Joaquim Germano Félix, Miguel Mochizuki Silva
+"""
+
 import numpy as np
 import pandas as pd
 
@@ -13,20 +21,32 @@ TOLERANCIA_GEMEOS_G = 2.0
 
 
 def kcal_dos_macros(pratos: pd.DataFrame) -> pd.Series:
+    """Calorias estimadas pelos macros (4 kcal/g de carbo e proteína, 9 de gordura)."""
     return sum(pratos[macro] * kcal for macro, kcal in KCAL_POR_GRAMA.items())
 
 
 def kcal_confere_com_macros(pratos: pd.DataFrame) -> pd.Series:
+    """Verdadeiro se a kcal registrada fica a até 30% da estimada pelos macros."""
     estimada = kcal_dos_macros(pratos)
     return (pratos["kcal"] - estimada).abs() <= DESVIO_MAXIMO_KCAL_DOS_MACROS * estimada
 
 
 def fibra_cabe_no_carbo(pratos: pd.DataFrame) -> pd.Series:
+    """Verdadeiro se a fibra não passa do carbo, o que inclui a fibra."""
     # A fibra é parte do carboidrato total, então fibra acima do carbo é erro de registro.
     return pratos["fibra"] <= pratos["carbo"]
 
 
 def representantes(macros: np.ndarray) -> list[int]:
+    """Escolhe um prato por grupo de gêmeos, o primeiro de cada um.
+
+    Args:
+        macros: Matriz (pratos, macros) em gramas, em ordem de prioridade.
+
+    Returns:
+        Posições dos pratos mantidos. Dois pratos são gêmeos se nenhum macro difere
+        mais que `TOLERANCIA_GEMEOS_G`.
+    """
     escolhidos: list[int] = []
     for linha, valores in enumerate(macros):
         distancias = np.abs(macros[escolhidos] - valores).max(axis=1)
@@ -36,10 +56,21 @@ def representantes(macros: np.ndarray) -> list[int]:
 
 
 def unir_gemeos(variantes: pd.DataFrame) -> pd.DataFrame:
+    """Mantém só um prato de cada grupo de gêmeos de digitação."""
     return variantes.iloc[representantes(variantes[list(MACROS)].to_numpy())]
 
 
 def montar_cardapio(refeicoes: pd.DataFrame) -> pd.DataFrame:
+    """Monta a tabela `cardapio` a partir das refeições reais.
+
+    Fica com pratos que têm foto, macros completos e coerentes, e kcal mínima.
+
+    Args:
+        refeicoes: Tabela `refeicoes`.
+
+    Returns:
+        Tabela no formato do esquema, com `prato` igual à posição da linha.
+    """
     macros = list(MACROS)
     com_macros = refeicoes.dropna(subset=macros)
     # O CGMacros não traz nome de prato. Sem foto, não há como mostrar o que comer.

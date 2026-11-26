@@ -1,3 +1,11 @@
+"""Estratégias de comparação para o algoritmo genético.
+
+`busca_aleatoria` gasta o mesmo orçamento de avaliações, `menos_carbo` escolhe o
+cardápio com menos carboidrato e `habito` repete o que a pessoa já comia.
+
+Autores: Joaquim Germano Félix, Miguel Mochizuki Silva
+"""
+
 import itertools
 
 import numpy as np

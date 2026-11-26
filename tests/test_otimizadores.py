@@ -1,3 +1,8 @@
+"""Testes das estratégias de comparação (`otimizadores`) e do NSGA-II (`nsga2`).
+
+Autores: Joaquim Germano Félix, Miguel Mochizuki Silva
+"""
+
 import itertools
 
 import numpy as np

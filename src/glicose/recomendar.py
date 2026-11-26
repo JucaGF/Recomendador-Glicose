@@ -1,3 +1,11 @@
+"""Recomenda o plano de D7 a D9 de um participante.
+
+Roda o algoritmo genético com o simulador treinado, mantém D7 e D8 no horário e na
+caminhada do hábito e grava o plano em JSON e em uma grade de fotos.
+
+Autores: Joaquim Germano Félix, Miguel Mochizuki Silva
+"""
+
 import argparse
 import json
 import time
@@ -36,6 +44,10 @@ COR_SEM_FOTO = "0.9"
 
 
 def d7_d8_do_habito(planos: Populacao, perfil: pd.Series, cardapio: pd.DataFrame) -> Populacao:
+    """Devolve os planos com intervalos e caminhadas de D7 e D8 iguais aos do hábito.
+
+    Só D9 é otimizado, a única parte que a iAUC mede.
+    """
     referencia = habito(perfil, cardapio)
     novo = planos.copiar()
     novo.intervalo[:, POSICOES_D7_D8] = referencia.intervalo[0, POSICOES_D7_D8]
@@ -44,6 +56,7 @@ def d7_d8_do_habito(planos: Populacao, perfil: pd.Series, cardapio: pd.DataFrame
 
 
 def sem_caminhada(planos: Populacao) -> Populacao:
+    """Cópia dos planos com a caminhada zerada."""
     return Populacao(
         planos.prato_no_tipo.copy(), planos.intervalo.copy(), np.zeros_like(planos.caminhada)
     )
@@ -52,6 +65,11 @@ def sem_caminhada(planos: Populacao) -> Populacao:
 def dias_fora_da_faixa(
     kcal_por_dia: np.ndarray, proteina_por_dia: np.ndarray, perfil: pd.Series
 ) -> tuple[np.ndarray, np.ndarray]:
+    """Conta os dias fora da faixa de kcal e abaixo da proteína mínima.
+
+    Returns:
+        Tupla `(dias_fora_kcal, dias_fora_proteina)`.
+    """
     fora_kcal = fora_da_faixa_kcal(kcal_por_dia, perfil) > 0
     fora_proteina = falta_proteina(proteina_por_dia, perfil) > 0
     return fora_kcal.sum(axis=-1), fora_proteina.sum(axis=-1)
@@ -64,6 +82,9 @@ def medir(
     cardapio: pd.DataFrame,
     lambdas: Lambdas,
 ) -> pd.DataFrame:
+    """Métricas de cada plano: iAUC de D9 (com e sem caminhada), distância do hábito,
+    aptidão e dias fora da faixa.
+    """
     dias_fora_kcal, dias_fora_proteina = dias_fora_da_faixa(
         ag.total_por_dia(planos, cardapio, "kcal"),
         ag.total_por_dia(planos, cardapio, "proteina"),
@@ -84,6 +105,7 @@ def medir(
 def refeicoes_dos_planos(
     planos: Populacao, simular: Simulador, perfil: pd.Series, cardapio: pd.DataFrame
 ) -> pd.DataFrame:
+    """Uma linha por refeição de cada plano, com prato, foto e iAUC prevista."""
     tabela = para_refeicoes(planos, cardapio, perfil)
     pratos = cardapio.iloc[indices_cardapio(planos, cardapio).ravel()]
     return tabela.assign(
@@ -105,6 +127,7 @@ def plano_para_json(
     semente: int,
     lambdas: Lambdas,
 ) -> dict:
+    """Converte um plano em dicionário com métricas e refeições."""
     metricas = medir(plano, simular, perfil, cardapio, lambdas).to_dict(orient="records")[0]
     colunas = [
         "dia",
@@ -130,6 +153,7 @@ def plano_para_json(
 
 
 def json_para_plano(dados: dict) -> Populacao:
+    """Reconstrói o plano a partir do dicionário de `plano_para_json`."""
     refeicoes = pd.DataFrame(dados["refeicoes"])
     return Populacao(
         refeicoes["prato_no_tipo"].to_numpy(dtype=np.int64)[None, :],
@@ -139,6 +163,11 @@ def json_para_plano(dados: dict) -> Populacao:
 
 
 def ler_foto(caminho_relativo: str) -> np.ndarray | None:
+    """Lê a foto do prato como miniatura RGB.
+
+    Returns:
+        A imagem, ou `None` se o arquivo não existe.
+    """
     caminho = pasta_dados() / caminho_relativo
     if not caminho.is_file():
         return None
@@ -149,11 +178,13 @@ def ler_foto(caminho_relativo: str) -> np.ndarray | None:
 
 
 def hora_e_minuto(horario: float) -> str:
+    """Formata horas decimais como HH:MM."""
     horas, minutos = divmod(round(horario * MINUTOS_POR_HORA), MINUTOS_POR_HORA)
     return f"{horas:02d}:{minutos:02d}"
 
 
 def desenhar_grade(figura: Figure | SubFigure, refeicoes: pd.DataFrame, titulo: str) -> None:
+    """Desenha a grade 3 × 3 de fotos, com horário, caminhada e macros."""
     eixos = figura.subplots(len(DIAS_PLANO), len(TIPOS_REFEICAO))
     for eixo, refeicao in zip(eixos.ravel(), refeicoes.itertuples(), strict=True):
         foto = ler_foto(refeicao.foto)
@@ -177,6 +208,7 @@ def desenhar_grade(figura: Figure | SubFigure, refeicoes: pd.DataFrame, titulo: 
 
 
 def gravar_grade(refeicoes: pd.DataFrame, titulo: str, caminho: Path) -> None:
+    """Grava a grade de refeições em um PNG."""
     figura = Figure(
         figsize=(
             POLEGADAS_POR_FOTO * len(TIPOS_REFEICAO),
@@ -197,6 +229,19 @@ def recomendar(
     pasta: Path = PASTA_PLANOS,
     config: ConfigAG = CONFIG,
 ) -> dict:
+    """Roda o algoritmo genético para uma pessoa e grava o plano.
+
+    Args:
+        perfil: Linha da tabela `perfis`.
+        cardapio: Tabela `cardapio`.
+        simular: Função que prevê a iAUC de cada refeição.
+        semente: Semente do algoritmo.
+        pasta: Onde gravar o JSON e o PNG.
+        config: Hiperparâmetros do AG.
+
+    Returns:
+        O plano como dicionário, o mesmo gravado em JSON.
+    """
     inicio = time.perf_counter()
     resultado = ag.rodar(config, simular, perfil, cardapio, semente)
     segundos = time.perf_counter() - inicio
@@ -221,6 +266,7 @@ def recomendar(
 
 
 def imprimir(plano: dict, pasta: Path) -> None:
+    """Imprime o resumo do plano."""
     nome = f"{plano['participante']:03d}"
     print(f"participante {nome} ({plano['grupo']}), semente {plano['semente']}")
     print(f"AG: {plano['avaliacoes']} avaliacoes em {plano['segundos']:.1f} s")
@@ -240,6 +286,7 @@ def imprimir(plano: dict, pasta: Path) -> None:
 
 
 def main() -> None:
+    """Lê os artefatos, recomenda o plano do participante pedido e imprime o resultado."""
     parser = argparse.ArgumentParser(description="Recomenda refeições e caminhadas de D7 a D9.")
     parser.add_argument("--participante", type=int, required=True)
     parser.add_argument("--semente", type=int, default=0)

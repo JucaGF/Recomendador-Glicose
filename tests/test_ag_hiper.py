@@ -1,3 +1,8 @@
+"""Testes da busca de hiperparâmetros por AG e por busca aleatória (`ag_hiper`).
+
+Autores: Joaquim Germano Félix, Miguel Mochizuki Silva
+"""
+
 import numpy as np
 import pytest
 

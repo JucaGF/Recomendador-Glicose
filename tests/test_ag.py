@@ -1,3 +1,8 @@
+"""Testes do algoritmo genético (`ag`) e da representação do plano (`plano`).
+
+Autores: Joaquim Germano Félix, Miguel Mochizuki Silva
+"""
+
 import itertools
 
 import numpy as np

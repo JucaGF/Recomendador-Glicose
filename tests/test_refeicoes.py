@@ -1,3 +1,8 @@
+"""Testes da leitura dos CSVs (`leitura`) e da tabela de refeições (`refeicoes`).
+
+Autores: Joaquim Germano Félix, Miguel Mochizuki Silva
+"""
+
 import numpy as np
 import pandas as pd
 import pytest

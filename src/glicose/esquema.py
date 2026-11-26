@@ -1,3 +1,12 @@
+"""Contrato de dados do projeto.
+
+Define as colunas e os dtypes das tabelas `refeicoes`, `dias`, `perfis` e `cardapio`,
+as constantes de domínio e um gerador de dados sintéticos nesse formato, para testar
+o restante do código sem os dados reais.
+
+Autores: Joaquim Germano Félix, Miguel Mochizuki Silva
+"""
+
 import os
 from pathlib import Path
 
@@ -100,18 +109,38 @@ HORAS_DESDE_REFEICAO_ANTERIOR = {
 
 
 def pasta_dados() -> Path:
+    """Devolve a pasta dos dados, a variável `GLICOSE_DADOS` ou `data/` se ela não existir."""
     return Path(os.environ.get("GLICOSE_DADOS", "data")).expanduser()
 
 
 def conformar(tabela: pd.DataFrame, colunas: dict[str, str]) -> pd.DataFrame:
+    """Seleciona as colunas do esquema, na ordem dele, e converte cada uma ao seu dtype.
+
+    Args:
+        tabela: Tabela com pelo menos as colunas do esquema.
+        colunas: Esquema, no formato `{coluna: dtype}`.
+
+    Returns:
+        Nova tabela com índice renumerado.
+    """
     return tabela[list(colunas)].astype(colunas).reset_index(drop=True)
 
 
 def inclinacao(x: pd.Series, y: pd.Series) -> float:
+    """Inclinação da reta de mínimos quadrados de `y` em `x`."""
     return float(np.polyfit(x, y, 1)[0])
 
 
 def dados_sinteticos(n_participantes: int, semente: int) -> dict[str, pd.DataFrame]:
+    """Gera tabelas pequenas no formato do esquema, sem usar os dados reais.
+
+    Args:
+        n_participantes: Quantos participantes sintéticos criar.
+        semente: Semente do gerador aleatório.
+
+    Returns:
+        Dicionário com as tabelas `refeicoes`, `dias`, `perfis` e `cardapio`.
+    """
     rng = np.random.default_rng(semente)
     cardapio = _cardapio_sintetico(rng, n_participantes)
     perfis_base = _perfis_base(rng, n_participantes)

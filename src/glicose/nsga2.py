@@ -1,3 +1,11 @@
+"""NSGA-II para a frente de Pareto entre iAUC de D9 e distância do hábito.
+
+Reaproveita a representação e os operadores do algoritmo genético e trata kcal e
+proteína como restrições, com a dominância de Deb et al. (2002).
+
+Autores: Joaquim Germano Félix, Miguel Mochizuki Silva
+"""
+
 import argparse
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +39,15 @@ PASTA_ARTEFATOS = Path("artefatos")
 
 @dataclass
 class ResultadoNSGA:
+    """Saída do NSGA-II.
+
+    Attributes:
+        frente: Planos da primeira frente, sem objetivos repetidos.
+        objetivos: Matriz (planos, 2) com a iAUC de D9 e a distância do hábito.
+        viavel: Verdadeiro se todos os planos da frente respeitam kcal e proteína.
+        frentes_por_geracao: Objetivos da primeira frente em cada geração.
+        avaliacoes: Quantos planos o simulador avaliou.
+    """
     frente: Populacao
     objetivos: np.ndarray
     viavel: bool
@@ -39,21 +56,32 @@ class ResultadoNSGA:
 
 
 def calcular_objetivos(pop: Populacao, simular: Simulador, perfil, cardapio) -> np.ndarray:
+    """Os dois objetivos de cada plano, ambos a minimizar.
+
+    Returns:
+        Matriz (planos, 2) com a iAUC prevista de D9 e a distância do hábito.
+    """
     return np.column_stack(
         [iauc_d9(pop, simular, perfil, cardapio), distancia_habito(pop, perfil, cardapio)]
     )
 
 
 def calcular_violacao(pop: Populacao, perfil, cardapio) -> np.ndarray:
+    """Soma das penalidades de kcal e proteína, zero se o plano é viável."""
     return penalidade_kcal(pop, perfil, cardapio) + penalidade_proteina(pop, perfil, cardapio)
 
 
 def domina(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Verdadeiro onde `a` domina `b`: nenhum objetivo pior e algum melhor."""
     return (a <= b).all(axis=-1) & (a < b).any(axis=-1)
 
 
 # Dominância com restrições do artigo de Deb et al. (2002).
 def matriz_dominancia(objetivos: np.ndarray, violacao: np.ndarray) -> np.ndarray:
+    """Matriz booleana `[i, j]`, verdadeira se o plano `i` domina o `j` com restrições.
+
+    Um plano viável domina um inviável, e entre inviáveis vence o que viola menos.
+    """
     pareto = domina(objetivos[:, None, :], objetivos[None, :, :])
     viavel = violacao == 0
     viavel_a, viavel_b = viavel[:, None], viavel[None, :]
@@ -66,6 +94,11 @@ def matriz_dominancia(objetivos: np.ndarray, violacao: np.ndarray) -> np.ndarray
 
 
 def ordenar_nao_dominados(objetivos: np.ndarray, violacao=None) -> list[np.ndarray]:
+    """Separa os planos em frentes de Pareto, da melhor para a pior.
+
+    Returns:
+        Lista de vetores com as posições dos planos de cada frente.
+    """
     if violacao is None:
         violacao = np.zeros(len(objetivos))
     domina = matriz_dominancia(objetivos, violacao)
@@ -85,6 +118,10 @@ def ordenar_nao_dominados(objetivos: np.ndarray, violacao=None) -> list[np.ndarr
 
 
 def distancia_aglomeracao(frente: np.ndarray) -> np.ndarray:
+    """Distância de aglomeração de cada plano de uma frente.
+
+    As pontas recebem infinito, para o NSGA-II preservar os extremos.
+    """
     n, n_objetivos = frente.shape
     distancia = np.zeros(n)
     for m in range(n_objetivos):
@@ -100,6 +137,11 @@ def distancia_aglomeracao(frente: np.ndarray) -> np.ndarray:
 
 
 def classificar(objetivos: np.ndarray, violacao: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Posto da frente e distância de aglomeração de cada plano.
+
+    Returns:
+        Tupla `(posto, aglomeracao)`.
+    """
     posto = np.empty(len(objetivos), dtype=np.int64)
     aglomeracao = np.empty(len(objetivos))
     for numero, frente in enumerate(ordenar_nao_dominados(objetivos, violacao)):
@@ -109,11 +151,13 @@ def classificar(objetivos: np.ndarray, violacao: np.ndarray) -> tuple[np.ndarray
 
 
 def sobreviventes(posto: np.ndarray, aglomeracao: np.ndarray, n: int) -> np.ndarray:
+    """Posições dos `n` melhores, por posto e, no empate, por aglomeração."""
     ordem = sorted(range(len(posto)), key=lambda i: (posto[i], -aglomeracao[i]))
     return np.array(ordem[:n])
 
 
 def torneio_binario(posto: np.ndarray, aglomeracao: np.ndarray, rng) -> int:
+    """Sorteia dois planos e devolve o de menor posto, ou o menos aglomerado."""
     i, j = rng.choice(len(posto), 2, replace=False)
     if posto[i] != posto[j]:
         return i if posto[i] < posto[j] else j
@@ -121,6 +165,7 @@ def torneio_binario(posto: np.ndarray, aglomeracao: np.ndarray, rng) -> int:
 
 
 def primeira_frente_sem_repeticao(pop: Populacao, objetivos, posto) -> tuple[Populacao, np.ndarray]:
+    """Planos da primeira frente, sem repetir os que têm os mesmos objetivos."""
     frente = np.nonzero(posto == 0)[0]
     _, primeiros = np.unique(objetivos[frente], axis=0, return_index=True)
     frente = frente[primeiros]
@@ -177,6 +222,10 @@ def rodar(config: ConfigAG, simular: Simulador, perfil, cardapio, semente: int) 
 
 
 def ponto_de_joelho(objetivos: np.ndarray) -> int:
+    """Posição do plano mais distante da reta entre os extremos da frente.
+
+    Os objetivos são normalizados antes, então a escolha não depende das unidades.
+    """
     if len(objetivos) == 1:
         return 0
     menor, maior = objetivos.min(axis=0), objetivos.max(axis=0)
@@ -187,6 +236,12 @@ def ponto_de_joelho(objetivos: np.ndarray) -> int:
 
 
 def desenhar_frentes(frentes: dict[str, tuple[np.ndarray, np.ndarray]], caminho: Path) -> None:
+    """Grava o gráfico das frentes de Pareto.
+
+    Args:
+        frentes: Dicionário `rótulo -> (objetivos da frente, objetivos do hábito)`.
+        caminho: Arquivo PNG de saída.
+    """
     figura = Figure(figsize=(7, 5))
     eixo = figura.subplots()
     for rotulo, (objetivos, ponto_habito) in frentes.items():
@@ -201,6 +256,7 @@ def desenhar_frentes(frentes: dict[str, tuple[np.ndarray, np.ndarray]], caminho:
 
 
 def main() -> None:
+    """Roda o NSGA-II com o simulador falso em dados sintéticos e grava a figura."""
     parser = argparse.ArgumentParser(description="Roda o NSGA-II de D7 a D9.")
     parser.add_argument("--falso", action="store_true", help="usa o simulador falso")
     parser.add_argument("--semente", type=int, default=0)

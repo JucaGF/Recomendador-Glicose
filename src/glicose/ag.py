@@ -1,3 +1,12 @@
+"""Algoritmo genético que escolhe o plano de D7 a D9.
+
+Minimiza a iAUC prevista de D9, com penalidades para kcal e proteína fora da faixa e
+para a distância do hábito. O simulador entra como uma função, então a rede treinada
+pode ser trocada pelo `simulador_falso`.
+
+Autores: Joaquim Germano Félix, Miguel Mochizuki Silva
+"""
+
 import argparse
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -42,6 +51,13 @@ SEMENTE_DADOS = 0
 # e com peso 500 cada desvio custa cerca de 1/5 da iAUC de uma refeição.
 @dataclass(frozen=True)
 class Lambdas:
+    """Pesos das penalidades somadas à iAUC na aptidão.
+
+    Attributes:
+        kcal: Peso da fração de kcal fora da faixa.
+        proteina: Peso da fração de proteína abaixo do mínimo.
+        habito: Peso da distância do hábito, em desvios-padrão do cardápio.
+    """
     kcal: float = 100_000.0
     proteina: float = 100_000.0
     habito: float = 500.0
@@ -49,6 +65,22 @@ class Lambdas:
 
 @dataclass(frozen=True)
 class ConfigAG:
+    """Hiperparâmetros do algoritmo genético.
+
+    Attributes:
+        tamanho_populacao: Planos por geração.
+        max_geracoes: Teto de gerações.
+        paciencia: Gerações seguidas sem melhora que encerram a busca.
+        tamanho_torneio: Candidatos sorteados em cada torneio.
+        elitismo: Melhores planos copiados sem mudança para a geração seguinte.
+        taxa_mutacao_prato: Chance de trocar o prato de uma refeição.
+        taxa_mutacao_gaussiana: Chance de perturbar um gene contínuo.
+        sigma_relativo_inicial: Desvio da mutação gaussiana na geração 0, como fração
+            da amplitude do gene.
+        sigma_relativo_final: Desvio na última geração.
+        horario_livre: Se verdadeiro, os intervalos também mudam. Senão ficam no hábito.
+        lambdas: Pesos das penalidades.
+    """
     tamanho_populacao: int = 100
     max_geracoes: int = 200
     paciencia: int = 120
@@ -66,6 +98,14 @@ class ConfigAG:
 
 @dataclass
 class Resultado:
+    """Saída de uma execução do algoritmo.
+
+    Attributes:
+        melhor: População com o melhor plano.
+        aptidao: Aptidão do melhor plano.
+        historico: Melhor, média, sigma e diversidade por geração.
+        avaliacoes: Quantos planos o simulador avaliou.
+    """
     melhor: Populacao
     aptidao: float
     historico: pd.DataFrame
@@ -73,32 +113,49 @@ class Resultado:
 
 
 def simulador_falso(refeicoes: pd.DataFrame) -> np.ndarray:
+    """iAUC fictícia, linear no carbo e na caminhada, para testar sem a rede."""
     return 1.5 * refeicoes["carbo"].to_numpy() - 10 * refeicoes["minutos_ativos_60"].to_numpy()
 
 
 def iauc_d9(
     pop: Populacao, simular: Simulador, perfil: pd.Series, cardapio: pd.DataFrame
 ) -> np.ndarray:
+    """iAUC prevista de D9, a soma das três refeições do último dia de cada plano.
+
+    Returns:
+        Vetor com um valor por plano.
+    """
     iauc_por_linha = np.asarray(simular(para_refeicoes(pop, cardapio, perfil)))
     iauc_por_refeicao = iauc_por_linha.reshape(len(pop), N_REFEICOES)
     return iauc_por_refeicao[:, POSICOES_D9].sum(axis=1)
 
 
 def total_por_dia(pop: Populacao, cardapio: pd.DataFrame, coluna: str) -> np.ndarray:
+    """Soma de uma coluna do cardápio (como `kcal`) em cada dia do plano.
+
+    Returns:
+        Matriz de forma (planos, dias).
+    """
     por_refeicao = cardapio[coluna].to_numpy()[indices_cardapio(pop, cardapio)]
     por_dia_e_tipo = por_refeicao.reshape(len(pop), len(DIAS_PLANO), len(TIPOS_REFEICAO))
     return por_dia_e_tipo.sum(axis=2)
 
 
 def penalidade_kcal(pop: Populacao, perfil: pd.Series, cardapio: pd.DataFrame) -> np.ndarray:
+    """Soma, nos três dias, da fração de kcal fora da faixa."""
     return fora_da_faixa_kcal(total_por_dia(pop, cardapio, "kcal"), perfil).sum(axis=1)
 
 
 def penalidade_proteina(pop: Populacao, perfil: pd.Series, cardapio: pd.DataFrame) -> np.ndarray:
+    """Soma, nos três dias, da fração de proteína abaixo do mínimo."""
     return falta_proteina(total_por_dia(pop, cardapio, "proteina"), perfil).sum(axis=1)
 
 
 def distancia_habito(pop: Populacao, perfil: pd.Series, cardapio: pd.DataFrame) -> np.ndarray:
+    """Distância média entre os pratos do plano e o hábito, em desvios-padrão do cardápio.
+
+    Refeições sem hábito no perfil ficam fora da média.
+    """
     alvo = macros_habito(perfil, cardapio)
     tem_habito = ~np.isnan(alvo).all(axis=1)
     macros_plano = macros_normalizados(cardapio)[indices_cardapio(pop, cardapio)]
@@ -125,12 +182,16 @@ def aptidao(
 
 
 def torneio(aptidoes: np.ndarray, tamanho: int, rng: np.random.Generator) -> tuple[int, int]:
+    """Sorteia candidatos e devolve os dois de menor aptidão, como pai e mãe."""
     candidatos = rng.choice(len(aptidoes), tamanho, replace=False)
     primeiro, segundo = candidatos[np.argsort(aptidoes[candidatos])[:2]]
     return primeiro, segundo
 
 
 def cruzamento(pai: Populacao, mae: Populacao, rng: np.random.Generator) -> Populacao:
+    """Cruzamento uniforme: cada refeição vem do pai ou da mãe, com prato, intervalo e
+    caminhada juntos.
+    """
     do_pai = rng.random(N_REFEICOES) < PROB_GENE_DO_PAI
     return Populacao(
         np.where(do_pai, pai.prato_no_tipo, mae.prato_no_tipo),
@@ -140,6 +201,11 @@ def cruzamento(pai: Populacao, mae: Populacao, rng: np.random.Generator) -> Popu
 
 
 def vizinhos_prato(cardapio: pd.DataFrame) -> dict[str, np.ndarray]:
+    """Para cada prato, os `VIZINHOS_PRATO` pratos do mesmo tipo com macros mais próximos.
+
+    Returns:
+        Dicionário `tipo -> matriz (pratos, vizinhos)`.
+    """
     macros = macros_normalizados(cardapio)
     vizinhos = {}
     for tipo in TIPOS_REFEICAO:
@@ -155,6 +221,15 @@ def vizinhos_prato(cardapio: pd.DataFrame) -> dict[str, np.ndarray]:
 def mutacao_prato(
     pop: Populacao, vizinhos: dict[str, np.ndarray], taxa: float, rng: np.random.Generator
 ) -> Populacao:
+    """Troca o prato de refeições sorteadas por um vizinho, ou, às vezes, por um prato
+    qualquer do tipo.
+
+    Args:
+        pop: Planos a mutar. Não é alterada.
+        vizinhos: Saída de `vizinhos_prato`.
+        taxa: Chance de mutar cada refeição.
+        rng: Gerador aleatório.
+    """
     novo = pop.copiar()
     sorteados = rng.random(novo.prato_no_tipo.shape) < taxa
     for i, j in zip(*np.nonzero(sorteados), strict=True):
@@ -173,6 +248,15 @@ def mutacao_gaussiana(
     rng: np.random.Generator,
     mutar_horario: bool = False,
 ) -> Populacao:
+    """Perturba caminhada e, se pedido, intervalos com ruído gaussiano e limita aos limites.
+
+    Args:
+        pop: Planos a mutar. Não é alterada.
+        sigma: Desvio do ruído, como fração da amplitude de cada gene.
+        taxa: Chance de mutar cada gene.
+        rng: Gerador aleatório.
+        mutar_horario: Se verdadeiro, os intervalos também mudam.
+    """
     forma = pop.intervalo.shape
     caminhada_min, caminhada_max = LIMITES_CAMINHADA
     ruido_caminhada = rng.normal(0, sigma * (caminhada_max - caminhada_min), forma)
@@ -189,11 +273,13 @@ def mutacao_gaussiana(
 
 
 def sigma(geracao: int, config: ConfigAG) -> float:
+    """Desvio relativo da mutação na geração, em queda linear até o valor final."""
     inicial, final = config.sigma_relativo_inicial, config.sigma_relativo_final
     return inicial + (final - inicial) * geracao / config.max_geracoes
 
 
 def diversidade(pop: Populacao) -> float:
+    """Média, entre as 9 refeições, de quantos pratos diferentes a população usa."""
     return float(np.mean([len(np.unique(pop.prato_no_tipo[:, j])) for j in range(N_REFEICOES)]))
 
 
@@ -204,6 +290,7 @@ def populacao_inicial(
     vizinhos: dict[str, np.ndarray],
     rng: np.random.Generator,
 ) -> Populacao:
+    """Metade de planos aleatórios e metade de cópias mutadas do hábito."""
     referencia = habito(perfil, cardapio)
     metade = config.tamanho_populacao // 2
     aleatorios = aleatoria(metade, cardapio, rng)
@@ -224,6 +311,18 @@ def rodar(
     cardapio: pd.DataFrame,
     semente: int,
 ) -> Resultado:
+    """Executa o algoritmo genético para uma pessoa.
+
+    Args:
+        config: Hiperparâmetros.
+        simular: Função que prevê a iAUC de cada refeição.
+        perfil: Linha da tabela `perfis`.
+        cardapio: Tabela `cardapio`.
+        semente: Semente do gerador aleatório.
+
+    Returns:
+        O melhor plano, a aptidão, o histórico e o número de avaliações.
+    """
     rng = np.random.default_rng(semente)
     vizinhos = vizinhos_prato(cardapio)
     pop = populacao_inicial(config, perfil, cardapio, vizinhos, rng)
@@ -269,6 +368,7 @@ def rodar(
 
 
 def mostrar_plano(plano: Populacao, perfil: pd.Series, cardapio: pd.DataFrame) -> str:
+    """Texto com as 9 refeições do plano, uma por linha."""
     tabela = para_refeicoes(plano, cardapio, perfil)
     tabela.insert(3, "prato", indices_cardapio(plano, cardapio).ravel())
     colunas = ["dia", "tipo", "horario", "prato", "carbo", "proteina", "kcal", "minutos_ativos_60"]
@@ -276,6 +376,7 @@ def mostrar_plano(plano: Populacao, perfil: pd.Series, cardapio: pd.DataFrame) -
 
 
 def main() -> None:
+    """Roda o algoritmo com o simulador falso em dados sintéticos e imprime o resultado."""
     parser = argparse.ArgumentParser(description="Roda o algoritmo genético de D7 a D9.")
     parser.add_argument("--falso", action="store_true", help="usa o simulador falso")
     parser.add_argument("--semente", type=int, default=0)
