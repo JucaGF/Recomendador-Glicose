@@ -1,3 +1,8 @@
+"""Testes do simulador (`simulador`) e dos baselines (`baselines_modelo`).
+
+Autores: Joaquim Germano Félix, Miguel Mochizuki Silva
+"""
+
 import keras
 import numpy as np
 import pandas as pd

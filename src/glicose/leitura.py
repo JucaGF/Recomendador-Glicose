@@ -1,3 +1,11 @@
+"""Leitura dos CSVs brutos do CGMacros.
+
+Lê glicose, METs e refeições de cada participante em uma grade de 1 minuto, recupera
+as leituras reais do sensor e decide quais dias do estudo são válidos.
+
+Autores: Joaquim Germano Félix, Miguel Mochizuki Silva
+"""
+
 import pandas as pd
 
 from glicose.esquema import pasta_dados
@@ -40,12 +48,18 @@ REFEICOES_MINIMAS_DIA = 2
 
 
 def participantes() -> list[int]:
+    """Lista os participantes presentes em disco, sem os excluídos."""
     pastas = sorted((pasta_dados() / "CGMacros").glob("CGMacros-0*"))
     ids = [int(pasta.name.removeprefix("CGMacros-")) for pasta in pastas if pasta.is_dir()]
     return [participante for participante in ids if participante not in PARTICIPANTES_EXCLUIDOS]
 
 
 def ler_grupos() -> pd.Series:
+    """Classifica cada participante em saudável, pré-diabetes ou DM2 pela HbA1c do laboratório.
+
+    Returns:
+        Série `grupo` indexada pelo número do participante.
+    """
     biometria = pd.read_csv(pasta_dados() / "CGMacros" / "bio.csv")
     a1c = biometria.set_index("subject")["A1c PDL (Lab)"]
     grupos = pd.cut(
@@ -58,6 +72,15 @@ def ler_grupos() -> pd.Series:
 
 
 def ler_participante(participante: int) -> pd.DataFrame:
+    """Lê o CSV de um participante em uma grade de 1 minuto.
+
+    Args:
+        participante: Número do participante.
+
+    Returns:
+        Tabela indexada por `instante`, com glicose dos dois sensores, METs, tipo da
+        refeição, macros e caminho da foto.
+    """
     pasta = pasta_dados() / "CGMacros" / f"CGMacros-{participante:03d}"
     bruto = pd.read_csv(pasta / f"CGMacros-{participante:03d}.csv")
     bruto.columns = bruto.columns.str.strip()
@@ -104,10 +127,22 @@ def leituras_nativas(serie: pd.Series) -> pd.Series:
 
 
 def mais_comum(valores: pd.Series) -> int:
+    """Moda dos valores. Em empate, o menor."""
     return int(valores.mode().min())
 
 
 def dias_validos(tabela: pd.DataFrame) -> pd.DataFrame:
+    """Numera os dias do estudo (D1, D2, ...) e descarta os que não servem.
+
+    Um dia vale com cobertura do Dexcom acima de `COBERTURA_MINIMA_DIA` e ao menos
+    `REFEICOES_MINIMAS_DIA` refeições principais.
+
+    Args:
+        tabela: Saída de `ler_participante`.
+
+    Returns:
+        Tabela com `dia`, `data`, `cobertura_cgm` e `n_refeicoes`.
+    """
     principais = tabela["refeicao"].isin(TIPOS_REFEICAO.values())
     com_dexcom = tabela["dexcom"].notna()
     data = tabela.index.normalize()

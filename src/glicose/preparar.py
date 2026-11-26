@@ -1,3 +1,11 @@
+"""Grava as tabelas do projeto em `artefatos/`.
+
+Roda a ingestão completa e salva `refeicoes`, `dias`, `perfis` e `cardapio` em
+parquet.
+
+Autores: Joaquim Germano Félix, Miguel Mochizuki Silva
+"""
+
 import pandas as pd
 
 from glicose.cardapio import montar_cardapio
@@ -7,6 +15,7 @@ from glicose.refeicoes import ARTEFATOS, montar_tabelas
 
 
 def main() -> None:
+    """Monta as quatro tabelas, grava os parquets e imprime a contagem de perfis e pratos."""
     refeicoes, dias = montar_tabelas()
     bio = pd.read_csv(pasta_dados() / "CGMacros" / "bio.csv")
     tabelas = {

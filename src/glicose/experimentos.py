@@ -1,3 +1,12 @@
+"""Compara as estratégias de plano de D7 a D9 em todos os participantes elegíveis.
+
+Para cada pessoa roda o hábito, o comportamento real, as estratégias de menos carbo,
+o ótimo exato, e, com várias sementes, o AG, a busca aleatória e o NSGA-II. Grava
+`resultados.parquet` e `curvas.parquet` em `artefatos/`, em paralelo por processos.
+
+Autores: Joaquim Germano Félix, Miguel Mochizuki Silva
+"""
+
 import argparse
 import itertools
 import os
@@ -34,6 +43,7 @@ CAMINHADA_MAXIMA = LIMITES_CAMINHADA[1]
 
 
 def menos_carbo_caminhando(perfil: pd.Series, cardapio: pd.DataFrame) -> Populacao:
+    """Plano de menos carbo com a caminhada de D9 no máximo."""
     plano = otimizadores.menos_carbo(perfil, cardapio)
     plano.caminhada[:, ag.POSICOES_D9] = CAMINHADA_MAXIMA
     return plano
@@ -42,6 +52,14 @@ def menos_carbo_caminhando(perfil: pd.Series, cardapio: pd.DataFrame) -> Populac
 def otimo_exato(
     perfil: pd.Series, cardapio: pd.DataFrame, simular, config: ConfigAG = CONFIG
 ) -> Populacao:
+    """Melhor plano do espaço de pratos, por enumeração exata.
+
+    Com os horários do hábito, D7 e D8 não afetam a iAUC, então basta achar o melhor dia
+    sem iAUC para D7 e D8 e o melhor com a iAUC para D9.
+
+    Raises:
+        ValueError: Se a configuração libera os horários.
+    """
     if config.horario_livre:
         raise ValueError("o ótimo exato só vale com os horários do hábito")
     quantos = [len(pratos_do_tipo(cardapio, tipo)) for tipo in TIPOS_REFEICAO]
@@ -119,11 +137,20 @@ CURVAS = {
 
 
 def conformar_com_ausentes(tabela: pd.DataFrame, colunas: dict[str, str]) -> pd.DataFrame:
+    """Como `conformar`, mas cria como ausentes as colunas que faltam."""
     return conformar(tabela.reindex(columns=list(colunas)), colunas)
 
 
 @cache
 def dados() -> dict:
+    """Carrega as tabelas e o simulador, uma vez por processo.
+
+    Limita o TensorFlow a uma thread, porque o paralelismo vem dos processos.
+
+    Returns:
+        Dicionário com as tabelas `refeicoes`, `dias`, `perfis` e `cardapio` e o
+        `simulador`.
+    """
     tf.config.threading.set_intra_op_parallelism_threads(THREADS_POR_PROCESSO)
     tf.config.threading.set_inter_op_parallelism_threads(THREADS_POR_PROCESSO)
     tabelas = {
@@ -136,6 +163,11 @@ def dados() -> dict:
 
 
 def elegiveis(dias: pd.DataFrame, perfis: pd.DataFrame) -> pd.Series:
+    """Participantes com os três dias de D7 a D9 válidos e perfil.
+
+    Returns:
+        Série `grupo` indexada pelo participante.
+    """
     dias_plano = dias[dias["dia"].isin(DIAS_PLANO)].groupby("participante")["dia"].nunique()
     completos = dias_plano.index[dias_plano == len(DIAS_PLANO)]
     grupos = perfis.set_index("participante")["grupo"]
@@ -143,6 +175,7 @@ def elegiveis(dias: pd.DataFrame, perfis: pd.DataFrame) -> pd.Series:
 
 
 def vitrine(grupos: pd.Series) -> list[int]:
+    """Participante de menor número de cada grupo, que as figuras mostram em detalhe."""
     return sorted(grupos.reset_index().groupby("grupo")["participante"].min())
 
 
@@ -156,6 +189,18 @@ def linhas_dos_planos(
     lambdas: Lambdas = CONFIG.lambdas,
     **extra,
 ) -> pd.DataFrame:
+    """Tabela de refeições dos planos, com as métricas de cada plano e os dados da execução.
+
+    Args:
+        planos: Planos a registrar.
+        estrategia: Nome da estratégia.
+        semente: Semente da execução, ou `None` nas estratégias determinísticas.
+        perfil: Linha da tabela `perfis`.
+        simular: Função que prevê a iAUC de cada refeição.
+        cardapio: Tabela `cardapio`.
+        lambdas: Pesos da aptidão.
+        **extra: Colunas adicionais, como `avaliacoes` e `segundos`.
+    """
     refeicoes = refeicoes_dos_planos(planos, simular, perfil, cardapio)
     metricas = medir(planos, simular, perfil, cardapio, lambdas)
     return refeicoes.join(metricas, on="plano").assign(
@@ -164,6 +209,10 @@ def linhas_dos_planos(
 
 
 def d9_comparavel_com_um_plano(reais: pd.DataFrame, dia_alvo: pd.DataFrame) -> bool:
+    """Verdadeiro se o D9 real tem só as três refeições, uma de cada tipo, com atividade.
+
+    Só então ele se compara com um plano de D9.
+    """
     so_tres_refeicoes = dia_alvo["n_refeicoes"].tolist() == [len(TIPOS_REFEICAO)]
     uma_limpa_de_cada_tipo = sorted(reais["tipo"]) == sorted(TIPOS_REFEICAO)
     atividade_medida = reais["minutos_ativos_60"].notna().all()
@@ -171,6 +220,11 @@ def d9_comparavel_com_um_plano(reais: pd.DataFrame, dia_alvo: pd.DataFrame) -> b
 
 
 def comportamento_real(perfil, refeicoes: pd.DataFrame, dias: pd.DataFrame, simular):
+    """Linhas do D9 que a pessoa de fato fez, avaliadas pelo simulador.
+
+    Returns:
+        A tabela, ou `None` se o D9 real não é comparável com um plano.
+    """
     participante = perfil["participante"]
     reais = refeicoes[(refeicoes["participante"] == participante) & (refeicoes["dia"] == DIA_ALVO)]
     dia_alvo = dias[(dias["participante"] == participante) & (dias["dia"] == DIA_ALVO)]
@@ -202,6 +256,7 @@ def comportamento_real(perfil, refeicoes: pd.DataFrame, dias: pd.DataFrame, simu
 
 
 def curva(historico: pd.DataFrame, estrategia: str, semente: int, perfil) -> pd.DataFrame:
+    """Anexa estratégia, semente e identificação da pessoa ao histórico do AG."""
     return historico.assign(
         participante=perfil["participante"],
         grupo=perfil["grupo"],
@@ -213,6 +268,11 @@ def curva(historico: pd.DataFrame, estrategia: str, semente: int, perfil) -> pd.
 def rodar_deterministicas(
     perfil, tabelas: dict, simular, config: ConfigAG = CONFIG
 ) -> list[pd.DataFrame]:
+    """Roda as estratégias sem sorteio e o comportamento real, se existir.
+
+    Returns:
+        Lista de tabelas de refeições.
+    """
     cardapio = tabelas["cardapio"]
     planos = {nome: montar(perfil, cardapio) for nome, montar in DETERMINISTICAS.items()}
     planos["otimo"] = otimo_exato(perfil, cardapio, simular, config)
@@ -225,6 +285,11 @@ def rodar_deterministicas(
 
 
 def rodar_semente(perfil, tabelas: dict, simular, semente: int, config: ConfigAG):
+    """Roda AG, busca aleatória e NSGA-II com uma semente, com o mesmo orçamento do AG.
+
+    Returns:
+        Tabelas de refeições e de curvas.
+    """
     cardapio = tabelas["cardapio"]
     inicio = time.perf_counter()
     resultado_ag = ag.rodar(config, simular, perfil, cardapio, semente)
@@ -280,6 +345,13 @@ def rodar_semente(perfil, tabelas: dict, simular, semente: int, config: ConfigAG
 
 
 def rodar_tarefa(participante: int, semente: int | None, config: ConfigAG = CONFIG):
+    """Executa uma tarefa do pool: as estratégias determinísticas ou uma semente.
+
+    Args:
+        participante: Número do participante.
+        semente: Semente, ou `None` para as determinísticas.
+        config: Hiperparâmetros do AG.
+    """
     tabelas = dados()
     perfil = tabelas["perfis"].loc[participante]
     sim = tabelas["simulador"]
@@ -296,6 +368,7 @@ def rodar_tarefa(participante: int, semente: int | None, config: ConfigAG = CONF
 
 
 def tarefas(grupos: pd.Series, sementes: int) -> list[tuple[int, int | None]]:
+    """Pares `(participante, semente)`, com `None` para as estratégias determinísticas."""
     return [
         (participante, semente)
         for participante in grupos.index
@@ -304,6 +377,7 @@ def tarefas(grupos: pd.Series, sementes: int) -> list[tuple[int, int | None]]:
 
 
 def main() -> None:
+    """Roda todas as tarefas em paralelo e grava `resultados.parquet` e `curvas.parquet`."""
     parser = argparse.ArgumentParser(description="Compara as estratégias de D7 a D9.")
     parser.add_argument("--sementes", type=int, default=SEMENTES)
     parser.add_argument("--processos", type=int, default=os.cpu_count())

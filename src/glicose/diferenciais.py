@@ -1,3 +1,12 @@
+"""Análises que mostram os limites do sistema e o valor da personalização.
+
+Compara o AG com e sem as travas do cardápio, com o horário livre, mede se o plano de
+uma pessoa serve para outra e testa o efeito de treinar com o alvo interpolado em grade
+de 1 minuto. Grava figuras e tabelas em `artefatos/diferenciais/`.
+
+Autores: Joaquim Germano Félix, Miguel Mochizuki Silva
+"""
+
 import argparse
 import itertools
 import os
@@ -74,16 +83,19 @@ Simular = Callable[[pd.DataFrame], np.ndarray]
 
 
 class Saida(NamedTuple):
+    """Resultado de uma tarefa, com a tabela e o tempo de CPU gasto."""
     tabela: pd.DataFrame
     segundos_cpu: float
 
 
 def treino_do_simulador(refeicoes: pd.DataFrame, perfis: pd.DataFrame) -> pd.DataFrame:
+    """Refeições de D1 a D6 com macros completos, as que treinaram a rede."""
     estudo = simulador.particao_do_estudo(refeicoes, perfis).refeicoes
     return estudo[estudo["dia"].isin(DIAS_HABITO)].dropna(subset=list(MACROS))
 
 
 def horario_d9(perfil: pd.Series, cardapio: pd.DataFrame) -> np.ndarray:
+    """Horários das três refeições de D9 no hábito da pessoa."""
     return horarios(habito(perfil, cardapio))[0, ag.POSICOES_D9]
 
 
@@ -103,6 +115,7 @@ def refeicoes_livres(genes: np.ndarray, perfil: pd.Series, horario: np.ndarray) 
 def aptidao_livre(
     genes: np.ndarray, simular: Simular, perfil: pd.Series, horario: np.ndarray, lambdas: Lambdas
 ) -> np.ndarray:
+    """Aptidão do AG sem travas: iAUC de D9 mais a penalidade de proteína."""
     iauc = np.asarray(simular(refeicoes_livres(genes, perfil, horario)))
     iauc_d9 = iauc.reshape(len(genes), len(TIPOS_REFEICAO)).sum(axis=1)
     proteina_d9 = genes[..., GENES_LIVRES.index("proteina")].sum(axis=1)
@@ -112,6 +125,7 @@ def aptidao_livre(
 def mutacao_livre(
     genes: np.ndarray, sigma: float, taxa: float, limites: tuple, rng: np.random.Generator
 ) -> np.ndarray:
+    """Mutação gaussiana dos genes contínuos, limitada à caixa de busca."""
     minimo, maximo = limites
     ruido = rng.normal(0, sigma * (maximo - minimo), genes.shape)
     mutado = genes + np.where(rng.random(genes.shape) < taxa, ruido, 0)
@@ -163,16 +177,29 @@ def ag_sem_travas(
 
 
 def limites_livres(treino: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+    """Caixa de busca do AG sem travas.
+
+    Returns:
+        Mínimos (zero) e máximos (o dobro do maior macro do treino e a caminhada máxima).
+    """
     maximos = FOLGA_GRAMAS * treino[list(MACROS)].max().to_numpy()
     return np.zeros(len(GENES_LIVRES)), np.append(maximos, LIMITES_CAMINHADA[1])
 
 
 def d9_do_plano(plano: Populacao, perfil: pd.Series, cardapio: pd.DataFrame) -> pd.DataFrame:
+    """Refeições de D9 de um plano, no formato de entrada do simulador."""
     tabela = para_refeicoes(plano, cardapio, perfil)
     return tabela[tabela["dia"] == DIA_ALVO].reset_index(drop=True)
 
 
 def rodar_variante(variante: str, participante: int, semente: int) -> Saida:
+    """Roda uma variante do AG em D9 para um participante.
+
+    Args:
+        variante: Uma de `VARIANTES`, ou o ótimo exato.
+        participante: Número do participante.
+        semente: Semente do AG.
+    """
     inicio = time.process_time()
     tabelas = dados()
     perfil = tabelas["perfis"].loc[participante]
@@ -248,6 +275,11 @@ def planos_proprios(iauc: pd.DataFrame) -> np.ndarray:
 
 
 def matriz_personalizacao(iauc: pd.DataFrame) -> pd.DataFrame:
+    """iAUC do plano de cada pessoa avaliado no perfil de cada outra.
+
+    Returns:
+        Tabela com `plano_de` nas linhas e `perfil_de` nas colunas.
+    """
     previsto = iauc.to_numpy()[:, planos_proprios(iauc)]
     matriz = pd.DataFrame(previsto.T, index=iauc.index, columns=iauc.index)
     matriz.index.name, matriz.columns.name = "plano_de", "perfil_de"
@@ -263,6 +295,7 @@ def diagonal_estrita(matriz: pd.DataFrame) -> pd.Series:
 
 
 def perda_de_outro_plano(matriz: pd.DataFrame) -> pd.Series:
+    """Quanto cada plano alheio custa a mais que o próprio, fora da diagonal."""
     perda = matriz.sub(np.diag(matriz), axis=1).to_numpy()
     return pd.Series(perda[~np.eye(len(matriz), dtype=bool)])
 
@@ -305,6 +338,7 @@ def simulador_cego(
 
 
 def ordem_por_grupo(grupos: pd.Series) -> list[int]:
+    """Participantes ordenados por grupo (saudável, pré-diabetes, DM2) e número."""
     posicao = {grupo: i for i, grupo in enumerate(GRUPOS)}
     return sorted(grupos.index, key=lambda p: (posicao[grupos[p]], p))
 
@@ -349,6 +383,7 @@ def versao_das_refeicoes(versao: str) -> tuple[pd.DataFrame, pd.DataFrame]:
 
 
 def rodar_fold(versao: str, fold: int) -> Saida:
+    """Treina a rede em uma dobra com a versão do alvo e prevê D7 a D9 do teste."""
     inicio = time.process_time()
     refeicoes, perfis = versao_das_refeicoes(versao)
     treino, teste = list(simulador.dividir(refeicoes, perfis))[fold]
@@ -362,6 +397,7 @@ def rodar_fold(versao: str, fold: int) -> Saida:
 
 
 def erro_por_fold(previsoes: pd.DataFrame, alvo: str) -> pd.DataFrame:
+    """MAE de cada dobra e versão contra o alvo escolhido."""
     erro = (previsoes[alvo] - previsoes["previsto"]).abs()
     return erro.groupby([previsoes["versao"], previsoes["fold"]]).mean().unstack("versao")
 
@@ -369,16 +405,21 @@ def erro_por_fold(previsoes: pd.DataFrame, alvo: str) -> pd.DataFrame:
 def figura(
     n_paineis: int, largura: float = POLEGADAS_POR_PAINEL, altura: float = POLEGADAS_POR_PAINEL
 ) -> tuple[Figure, np.ndarray]:
+    """Cria uma figura com `n_paineis` eixos lado a lado."""
     fig = Figure(figsize=(largura * n_paineis, altura), layout="constrained")
     return fig, np.atleast_1d(fig.subplots(1, n_paineis))
 
 
 def gravar(fig: Figure, nome: str) -> None:
+    """Grava a figura em `artefatos/diferenciais/`."""
     PASTA.mkdir(parents=True, exist_ok=True)
     fig.savefig(PASTA / nome, dpi=DPI)
 
 
 def distancia_ao_treino(refeicoes: pd.DataFrame, treino: pd.DataFrame) -> np.ndarray:
+    """Distância de cada refeição à refeição mais próxima do treino, em desvios-padrão dos
+    macros.
+    """
     escala = treino[list(MACROS)].std().to_numpy()
     pontos = refeicoes[list(MACROS)].to_numpy() / escala
     referencia = treino[list(MACROS)].to_numpy() / escala
@@ -386,6 +427,7 @@ def distancia_ao_treino(refeicoes: pd.DataFrame, treino: pd.DataFrame) -> np.nda
 
 
 def fora_da_faixa(refeicoes: pd.DataFrame, treino: pd.DataFrame) -> pd.Series:
+    """Verdadeiro onde algum macro passa dos extremos vistos no treino."""
     macros = refeicoes[list(MACROS)]
     acima = macros > treino[list(MACROS)].max()
     abaixo = macros < treino[list(MACROS)].min()
@@ -393,6 +435,11 @@ def fora_da_faixa(refeicoes: pd.DataFrame, treino: pd.DataFrame) -> pd.Series:
 
 
 def analisar_sem_travas(planos_d9: pd.DataFrame, treino: pd.DataFrame) -> str:
+    """Compara o AG sem as travas do cardápio com o ótimo com travas e grava a figura.
+
+    Returns:
+        Resumo em texto.
+    """
     variantes = ["com_travas", "sem_travas"]
     d9 = planos_d9[planos_d9["variante"].isin(variantes)]
     d9 = d9.assign(
@@ -446,6 +493,7 @@ def analisar_sem_travas(planos_d9: pd.DataFrame, treino: pd.DataFrame) -> str:
 
 
 def faixa_de_horario() -> dict[str, tuple[float, float]]:
+    """Horário mais cedo e mais tarde possível de cada refeição de D9."""
     minimos, maximos = limites_intervalo()
     extremos = Populacao(
         np.zeros((2, N_REFEICOES), dtype=np.int64),
@@ -457,6 +505,7 @@ def faixa_de_horario() -> dict[str, tuple[float, float]]:
 
 
 def efeito_do_horario(participantes: list[int]) -> pd.DataFrame:
+    """Mudança prevista da iAUC ao levar cada refeição do hábito para o extremo da faixa."""
     tabelas = dados()
     sim, cardapio = tabelas["simulador"], tabelas["cardapio"]
     faixas = faixa_de_horario()
@@ -483,10 +532,16 @@ def efeito_do_horario(participantes: list[int]) -> pd.DataFrame:
 
 
 def cai_ou_fica_acima(ganho: float) -> str:
+    """Texto que diz se a iAUC cai ou fica acima, com o valor."""
     return f"cai {ganho:.0f}" if ganho >= 0 else f"fica {-ganho:.0f} acima"
 
 
 def analisar_horario_livre(planos_d9: pd.DataFrame) -> str:
+    """Mede o ganho de liberar o horário das refeições e grava a figura.
+
+    Returns:
+        Resumo em texto.
+    """
     variantes = ["com_travas", "ag_horario_fixo", "horario_livre"]
     d9 = planos_d9[planos_d9["variante"].isin(variantes)]
     chave = ["participante", "semente", "tipo"]
@@ -543,6 +598,7 @@ TITULOS_SIMULADOR = {
 
 
 def desenhar_mapa(eixo, matriz: pd.DataFrame, grupos: pd.Series, titulo: str):
+    """Desenha o mapa de calor da perda de iAUC de cada plano no perfil alheio."""
     perda = matriz.sub(np.diag(matriz), axis=1)
     imagem = eixo.imshow(perda, cmap="Reds", vmin=0, vmax=np.nanpercentile(perda.to_numpy(), 95))
     fronteiras = np.cumsum(grupos.loc[matriz.index].value_counts().reindex(GRUPOS).fillna(0))
@@ -566,6 +622,16 @@ def concordancia(iauc: pd.DataFrame) -> float:
 
 
 class Personalizacao(NamedTuple):
+    """Medidas de personalização de um simulador.
+
+    Attributes:
+        matriz: Saída de `matriz_personalizacao`.
+        n_planos: Quantos planos distintos aparecem.
+        estrita: Se o plano próprio é estritamente o melhor da coluna.
+        perda_outro: Perda ao usar o plano de outra pessoa.
+        perda_grupo: Perda ao usar o plano feito para o grupo.
+        concordancia: Correlação de postos média entre pessoas.
+    """
     matriz: pd.DataFrame
     n_planos: int
     estrita: pd.Series
@@ -575,6 +641,7 @@ class Personalizacao(NamedTuple):
 
     @staticmethod
     def medir(iauc: pd.DataFrame, grupos: pd.Series) -> "Personalizacao":
+        """Calcula as medidas a partir da iAUC de cada dia viável por pessoa."""
         matriz = matriz_personalizacao(iauc)
         return Personalizacao(
             matriz,
@@ -586,6 +653,7 @@ class Personalizacao(NamedTuple):
         )
 
     def resumo(self) -> str:
+        """Frase com as medidas, para o relatório."""
         return (
             f"{self.n_planos} planos distintos; o próprio plano é estritamente o melhor da coluna "
             f"em {self.estrita.sum()} de {len(self.estrita)}; o plano de outra pessoa custa "
@@ -597,6 +665,14 @@ class Personalizacao(NamedTuple):
 
 
 def analisar_personalizacao(grupos: pd.Series) -> str:
+    """Mede a personalização com o perfil real e com o perfil na média, e grava as figuras.
+
+    Args:
+        grupos: Série `grupo` indexada pelo participante.
+
+    Returns:
+        Resumo em texto.
+    """
     tabelas = dados()
     sim, cardapio = tabelas["simulador"], tabelas["cardapio"]
     ordem = ordem_por_grupo(grupos)
@@ -655,6 +731,11 @@ def analisar_personalizacao(grupos: pd.Series) -> str:
 
 
 def analisar_interpolacao(previsoes: pd.DataFrame) -> str:
+    """Compara treinar com o alvo nativo e com o alvo da grade de 1 minuto.
+
+    Returns:
+        Resumo em texto.
+    """
     refeicoes = refeicoes_da_grade()
     contra_nativa = erro_por_fold(previsoes, "iauc_nativa")
     contra_propria = erro_por_fold(previsoes, "iauc_dexcom")
@@ -706,17 +787,20 @@ def analisar_interpolacao(previsoes: pd.DataFrame) -> str:
 
 
 def tarefas(grupos: pd.Series, semente: int) -> list[tuple]:
+    """Lista de tarefas: uma por dobra e versão, e uma por variante e participante."""
     # Os folds são as tarefas mais longas. Vão primeiro para não sobrarem sozinhos no fim.
     lista = [("fold", versao, fold) for fold in range(simulador.N_FOLDS) for versao in VERSOES]
     return lista + [("ag", variante, p, semente) for variante in VARIANTES for p in grupos.index]
 
 
 def executar(tarefa: tuple):
+    """Executa uma tarefa de `tarefas`."""
     tipo, *argumentos = tarefa
     return {"fold": rodar_fold, "ag": rodar_variante}[tipo](*argumentos)
 
 
 def main() -> None:
+    """Roda todas as tarefas em paralelo, imprime as análises e grava as figuras."""
     parser = argparse.ArgumentParser(description="Mostra os limites do sistema e a personalização.")
     parser.add_argument("--processos", type=int, default=PROCESSOS)
     parser.add_argument("--semente", type=int, default=SEMENTE)

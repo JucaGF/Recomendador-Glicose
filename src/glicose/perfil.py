@@ -1,3 +1,11 @@
+"""Perfil de cada participante, calculado só com os dias de hábito (D1 a D6).
+
+Junta os biomarcadores, a glicose do CGM, a sensibilidade ao carboidrato e a rotina
+média de refeições e caminhadas.
+
+Autores: Joaquim Germano Félix, Miguel Mochizuki Silva
+"""
+
 import numpy as np
 import pandas as pd
 
@@ -20,6 +28,11 @@ CAMINHADA = [f"caminhada_{tipo}" for tipo in TIPOS_REFEICAO]
 
 
 def sensibilidade_carbo(refeicoes_pessoa: pd.DataFrame) -> float:
+    """Inclinação da iAUC contra o carbo de uma pessoa, em mg/dL·min por grama.
+
+    Returns:
+        A inclinação, ou NaN se a pessoa tiver poucas refeições para uma reta.
+    """
     if len(refeicoes_pessoa) < MINIMO_REFEICOES_RETA:
         return np.nan
     inclinacao, _ = np.polyfit(refeicoes_pessoa["carbo"], refeicoes_pessoa["iauc_dexcom"], 1)
@@ -27,6 +40,17 @@ def sensibilidade_carbo(refeicoes_pessoa: pd.DataFrame) -> float:
 
 
 def montar_perfis(refeicoes: pd.DataFrame, dias: pd.DataFrame, bio: pd.DataFrame) -> pd.DataFrame:
+    """Monta a tabela `perfis`, uma linha por participante com dias de hábito.
+
+    Args:
+        refeicoes: Tabela `refeicoes`.
+        dias: Tabela `dias`.
+        bio: Tabela `bio.csv` bruta do CGMacros.
+
+    Returns:
+        Tabela no formato do esquema. Caminhadas ausentes são preenchidas com a mediana
+        do grupo.
+    """
     habito = refeicoes[refeicoes["dia"].isin(DIAS_HABITO)]
     habito = habito.assign(
         fibra=habito["fibra"].where(fibra_cabe_no_carbo(habito)),

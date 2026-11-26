@@ -1,3 +1,13 @@
+"""Representação do plano de D7 a D9 e suas restrições.
+
+Um plano tem 9 refeições (3 dias × café, almoço e jantar). Cada refeição é um prato do
+cardápio, o intervalo desde a refeição anterior e os minutos de caminhada. O módulo
+converte o plano na tabela que o simulador lê e calcula as penalidades de kcal,
+proteína e distância do hábito.
+
+Autores: Joaquim Germano Félix, Miguel Mochizuki Silva
+"""
+
 from dataclasses import dataclass
 
 import numpy as np
@@ -24,6 +34,13 @@ PROTEINA_MINIMA = 0.80
 
 @dataclass
 class Populacao:
+    """Conjunto de planos, um por linha, em três matrizes de forma (planos, 9 refeições).
+
+    Attributes:
+        prato_no_tipo: Posição do prato entre os pratos do mesmo tipo de refeição.
+        intervalo: Horas desde a refeição anterior. No café, a hora do café.
+        caminhada: Minutos ativos na primeira hora depois da refeição.
+    """
     prato_no_tipo: np.ndarray
     intervalo: np.ndarray
     caminhada: np.ndarray
@@ -40,10 +57,12 @@ class Populacao:
         )
 
     def copiar(self) -> "Populacao":
+        """Cópia independente da população."""
         return Populacao(self.prato_no_tipo.copy(), self.intervalo.copy(), self.caminhada.copy())
 
     @staticmethod
     def juntar(*partes: "Populacao") -> "Populacao":
+        """Concatena várias populações em uma."""
         return Populacao(
             np.concatenate([p.prato_no_tipo for p in partes]),
             np.concatenate([p.intervalo for p in partes]),
@@ -52,16 +71,27 @@ class Populacao:
 
 
 def limites_intervalo() -> tuple[np.ndarray, np.ndarray]:
+    """Limites do intervalo de cada refeição do plano.
+
+    Returns:
+        Tupla `(minimos, maximos)`, cada uma com um valor por refeição, em horas.
+    """
     por_refeicao = np.array([HORAS_DESDE_REFEICAO_ANTERIOR[tipo] for _, tipo in REFEICOES_PLANO])
     _, minimos, maximos = por_refeicao.T
     return minimos, maximos
 
 
 def pratos_do_tipo(cardapio: pd.DataFrame, tipo: str) -> np.ndarray:
+    """Posições do cardápio dos pratos de um tipo de refeição."""
     return cardapio.loc[cardapio["tipo"] == tipo, "prato"].to_numpy()
 
 
 def indices_cardapio(pop: Populacao, cardapio: pd.DataFrame) -> np.ndarray:
+    """Converte a posição do prato dentro do tipo na posição dele no cardápio inteiro.
+
+    Returns:
+        Matriz de forma (planos, 9 refeições).
+    """
     indices = np.empty_like(pop.prato_no_tipo)
     for j, (_, tipo) in enumerate(REFEICOES_PLANO):
         indices[:, j] = pratos_do_tipo(cardapio, tipo)[pop.prato_no_tipo[:, j]]
@@ -69,31 +99,55 @@ def indices_cardapio(pop: Populacao, cardapio: pd.DataFrame) -> np.ndarray:
 
 
 def macros_normalizados(cardapio: pd.DataFrame) -> np.ndarray:
+    """Macros de cada prato, divididos pelo desvio-padrão do cardápio."""
     macros = cardapio[list(MACROS)]
     return (macros / macros.std()).to_numpy()
 
 
 def macros_habito(perfil: pd.Series, cardapio: pd.DataFrame) -> np.ndarray:
+    """Macros médios que a pessoa come em cada refeição, na escala do cardápio.
+
+    Returns:
+        Matriz (9 refeições, macros). A linha é NaN quando o perfil não tem o hábito.
+    """
     escala = cardapio[list(MACROS)].std().to_numpy()
     habito_por_refeicao = [[perfil[f"{m}_{tipo}"] for m in MACROS] for _, tipo in REFEICOES_PLANO]
     return np.array(habito_por_refeicao, dtype=float) / escala
 
 
 def distancia_nos_macros_presentes(macros: np.ndarray, alvo: np.ndarray) -> np.ndarray:
+    """Distância euclidiana entre macros e alvo, ignorando os macros ausentes do alvo.
+
+    A soma é reescalada para quatro macros, então a distância não encolhe quando falta
+    algum.
+    """
     quadrados = (macros - alvo) ** 2
     soma_na_escala_dos_quatro_macros = len(MACROS) * np.nanmean(quadrados, axis=-1)
     return np.sqrt(soma_na_escala_dos_quatro_macros)
 
 
 def fora_da_faixa_kcal(kcal_por_dia: np.ndarray, perfil: pd.Series) -> np.ndarray:
+    """Fração da kcal do dia que passa da faixa de ±`FAIXA_KCAL` em torno do hábito.
+
+    Returns:
+        Zero dentro da faixa, e a distância até a borda fora dela.
+    """
     return np.maximum(np.abs(kcal_por_dia / perfil["kcal_dia"] - 1) - FAIXA_KCAL, 0)
 
 
 def falta_proteina(proteina_por_dia: np.ndarray, perfil: pd.Series) -> np.ndarray:
+    """Fração que falta para a proteína do dia chegar a `PROTEINA_MINIMA` do hábito."""
     return np.maximum(PROTEINA_MINIMA - proteina_por_dia / perfil["proteina_dia"], 0)
 
 
 def horarios(pop: Populacao) -> np.ndarray:
+    """Converte os intervalos em horários do dia.
+
+    O jantar é cortado para não passar de `HORA_MAXIMA_JANTAR`.
+
+    Returns:
+        Matriz de forma (planos, 9 refeições), em horas desde 0h.
+    """
     horario = np.empty_like(pop.intervalo)
     for j, (_, tipo) in enumerate(REFEICOES_PLANO):
         if tipo == "cafe":
@@ -108,6 +162,16 @@ def horarios(pop: Populacao) -> np.ndarray:
 
 
 def para_refeicoes(pop: Populacao, cardapio: pd.DataFrame, perfil: pd.Series) -> pd.DataFrame:
+    """Converte os planos na tabela de entrada do simulador, uma linha por refeição.
+
+    Args:
+        pop: Planos a converter.
+        cardapio: Tabela `cardapio`.
+        perfil: Perfil da pessoa, de onde vêm o participante e a glicose de jejum.
+
+    Returns:
+        Tabela no formato de `ENTRADA_SIMULADOR`, com `len(pop) * 9` linhas.
+    """
     pratos = cardapio.iloc[indices_cardapio(pop, cardapio).ravel()]
     tabela = pd.DataFrame(
         {
@@ -126,6 +190,7 @@ def para_refeicoes(pop: Populacao, cardapio: pd.DataFrame, perfil: pd.Series) ->
 
 
 def aleatoria(n: int, cardapio: pd.DataFrame, rng: np.random.Generator) -> Populacao:
+    """Sorteia `n` planos, com pratos, intervalos e caminhadas dentro dos limites."""
     prato_no_tipo = np.empty((n, N_REFEICOES), dtype=np.int64)
     for j, (_, tipo) in enumerate(REFEICOES_PLANO):
         prato_no_tipo[:, j] = rng.integers(0, len(pratos_do_tipo(cardapio, tipo)), n)
@@ -138,6 +203,14 @@ def aleatoria(n: int, cardapio: pd.DataFrame, rng: np.random.Generator) -> Popul
 
 
 def habito(perfil: pd.Series, cardapio: pd.DataFrame) -> Populacao:
+    """Plano que repete o hábito da pessoa.
+
+    Escolhe, entre as combinações de pratos de um dia, a que respeita kcal e proteína e
+    fica mais perto dos macros habituais. Horários e caminhadas vêm do perfil.
+
+    Returns:
+        População com um único plano.
+    """
     macros = macros_normalizados(cardapio)
     alvo_do_dia = macros_habito(perfil, cardapio)[: len(TIPOS_REFEICAO)]
     distancia, kcal, proteina = [], [], []

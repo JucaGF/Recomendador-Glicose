@@ -1,3 +1,8 @@
+"""Testes dos perfis (`perfil`) e do cardápio (`cardapio`).
+
+Autores: Joaquim Germano Félix, Miguel Mochizuki Silva
+"""
+
 import numpy as np
 import pandas as pd
 import pytest

@@ -1,3 +1,12 @@
+"""Figuras e tabelas finais a partir de `resultados.parquet` e `curvas.parquet`.
+
+Compara as estratégias por grupo clínico, o AG com a busca aleatória e o ótimo
+exato, e mostra macros, caminhada e as frentes de Pareto. Grava os PNGs em
+`artefatos/figuras/`.
+
+Autores: Joaquim Germano Félix, Miguel Mochizuki Silva
+"""
+
 import argparse
 from pathlib import Path
 
@@ -62,15 +71,28 @@ NOMES_MACRO = {"carbo": "carbo", "proteina": "proteína", "gordura": "gordura", 
 
 
 def planos(resultados: pd.DataFrame) -> pd.DataFrame:
+    """Uma linha por plano, sem repetir as refeições dele."""
     return resultados.drop_duplicates(CHAVE_PLANO)
 
 
 def media_por_pessoa(tabela: pd.DataFrame, colunas: list[str], por: list[str]) -> pd.DataFrame:
+    """Média das colunas primeiro por pessoa e depois por grupo, para cada pessoa pesar igual.
+
+    Args:
+        tabela: Tabela com a coluna `participante`.
+        colunas: Colunas a promediar.
+        por: Colunas que definem os grupos finais.
+    """
     por_pessoa = tabela.groupby([*por, "participante"])[colunas].mean()
     return por_pessoa.groupby(por).mean()
 
 
 def tabela_por_grupo(resultados: pd.DataFrame) -> pd.DataFrame:
+    """Métricas de cada estratégia, por grupo clínico, médias entre pessoas.
+
+    Returns:
+        Tabela indexada por `grupo` e `estrategia`.
+    """
     todos = planos(resultados)
     todos = todos[todos["estrategia"].isin(ESTRATEGIAS)].assign(
         viola=lambda t: (t["dias_fora_kcal"] + t["dias_fora_proteina"]) > 0,
@@ -104,6 +126,7 @@ def tabela_por_grupo(resultados: pd.DataFrame) -> pd.DataFrame:
 
 
 def caminhada_depois_da_troca(resultados: pd.DataFrame) -> pd.DataFrame:
+    """Parte do ganho de iAUC do AG sobre o hábito que vem da caminhada a mais, por grupo."""
     # O efeito da caminhada depende do prato e a previsão para no piso, então a parte mudaria
     # se a conta trocasse primeiro a caminhada. Ela fica negativa para quem o prato do AG deixa
     # sem margem para a caminhada baixar a iAUC.
@@ -131,11 +154,13 @@ def caminhada_depois_da_troca(resultados: pd.DataFrame) -> pd.DataFrame:
 
 
 def so_com_real(resultados: pd.DataFrame) -> pd.DataFrame:
+    """Limita a tabela às pessoas que têm o D9 real comparável."""
     com_real = resultados.loc[resultados["estrategia"] == "real", "participante"].unique()
     return resultados[resultados["participante"].isin(com_real)]
 
 
 def placar(ag: pd.Series, aleatoria: pd.Series) -> pd.Series:
+    """Fração de vitórias, empates e derrotas do AG sobre a busca aleatória."""
     # No piso do simulador os dois chegam à mesma iAUC sem que nenhum tenha achado plano melhor.
     empata = np.isclose(ag, aleatoria, rtol=TOLERANCIA_EMPATE, atol=0)
     return pd.Series(
@@ -148,6 +173,9 @@ def placar(ag: pd.Series, aleatoria: pd.Series) -> pd.Series:
 
 
 def vitorias_ag(resultados: pd.DataFrame) -> pd.DataFrame:
+    """Placar do AG contra a busca aleatória, por execução e por participante, em três
+    métricas.
+    """
     disputa = planos(resultados)
     disputa = disputa[disputa["estrategia"].isin(["ag", "aleatoria"])]
     linhas = {}
@@ -162,12 +190,14 @@ def vitorias_ag(resultados: pd.DataFrame) -> pd.DataFrame:
 
 
 def macros_d9(resultados: pd.DataFrame, estrategias=ESTRATEGIAS_MACROS) -> pd.DataFrame:
+    """Gramas de cada macro em D9, média por pessoa, por grupo e estratégia."""
     d9 = resultados[(resultados["dia"] == DIA_ALVO) & resultados["estrategia"].isin(estrategias)]
     por_plano = d9.groupby([*CHAVE_PLANO, "grupo"], dropna=False)[list(MACROS)].sum()
     return media_por_pessoa(por_plano.reset_index(), list(MACROS), ["grupo", "estrategia"])
 
 
 def no_piso(resultados: pd.DataFrame) -> pd.DataFrame:
+    """Fração de refeições de D9 cuja iAUC prevista está no piso do simulador."""
     d9 = resultados[
         (resultados["dia"] == DIA_ALVO) & resultados["estrategia"].isin(ESTRATEGIAS_PISO)
     ].assign(no_piso=lambda t: t["iauc"] <= IAUC_MINIMA)
@@ -177,6 +207,7 @@ def no_piso(resultados: pd.DataFrame) -> pd.DataFrame:
 
 
 def distancia_do_otimo(resultados: pd.DataFrame) -> pd.DataFrame:
+    """Quanto a aptidão de cada estratégia passa da do ótimo exato, em fração."""
     todos = planos(resultados)
     otimo = todos[todos["estrategia"] == "otimo"].set_index("participante")["aptidao"]
     melhor_de_cada_execucao = (
@@ -204,6 +235,7 @@ def distancia_do_otimo(resultados: pd.DataFrame) -> pd.DataFrame:
 
 
 def mudanca_por_dia(resultados: pd.DataFrame, estrategias=("ag", "otimo")) -> pd.DataFrame:
+    """Fração de pratos de cada dia diferentes dos do hábito."""
     chave = ["participante", "dia", "tipo"]
     habito = resultados.loc[resultados["estrategia"] == "habito", [*chave, "prato"]]
     outras = resultados[resultados["estrategia"].isin(estrategias)]
@@ -214,6 +246,11 @@ def mudanca_por_dia(resultados: pd.DataFrame, estrategias=("ag", "otimo")) -> pd
 
 
 def real_previsto_e_medido(resultados: pd.DataFrame) -> pd.Series:
+    """Compara a iAUC prevista e a medida do D9 real, por pessoa e por refeição.
+
+    Returns:
+        Médias, erro absoluto médio e correlações.
+    """
     reais = resultados[(resultados["estrategia"] == "real") & (resultados["dia"] == DIA_ALVO)]
     por_pessoa = reais.groupby("participante")[["iauc", "iauc_medida"]].sum()
     return pd.Series(
@@ -229,6 +266,7 @@ def real_previsto_e_medido(resultados: pd.DataFrame) -> pd.Series:
 
 
 def ganho_das_frentes(resultados: pd.DataFrame) -> pd.DataFrame:
+    """Quanto a iAUC de D9 cai do plano mais perto do hábito ao mais longe dele, por grupo."""
     frentes = planos(resultados)
     frentes = frentes[frentes["estrategia"] == FRENTE]
     linhas = []
@@ -250,6 +288,7 @@ def ganho_das_frentes(resultados: pd.DataFrame) -> pd.DataFrame:
 
 
 def figura_curvas(curvas: pd.DataFrame, destaque: list[int]) -> Figure:
+    """Evolução da melhor e da média da população do AG, por participante em destaque."""
     figura = Figure(
         figsize=(POLEGADAS_POR_PAINEL * len(destaque), ALTURA_FIGURA), layout="constrained"
     )
@@ -282,6 +321,7 @@ def figura_curvas(curvas: pd.DataFrame, destaque: list[int]) -> Figure:
 
 
 def figura_tabela(tabela: pd.DataFrame) -> Figure:
+    """Tabela de métricas por estratégia e grupo, como figura."""
     grupos = [g for g in GRUPOS if g in tabela.index.get_level_values("grupo")]
     estrategias = [e for e in ESTRATEGIAS if e in tabela.index.get_level_values("estrategia")]
     pessoas = tabela.groupby("grupo")["participantes"].max()
@@ -330,6 +370,7 @@ def figura_tabela(tabela: pd.DataFrame) -> Figure:
 
 
 def figura_ag_vs_aleatoria(resultados: pd.DataFrame, curvas: pd.DataFrame, destaque) -> Figure:
+    """Dispersão do AG contra a busca aleatória e a curva de evolução."""
     figura = Figure(figsize=(3 * POLEGADAS_POR_PAINEL, ALTURA_FIGURA), layout="constrained")
     dispersao, evolucao = figura.subplots(1, 2)
     disputa = planos(resultados)
@@ -382,6 +423,7 @@ def figura_ag_vs_aleatoria(resultados: pd.DataFrame, curvas: pd.DataFrame, desta
 
 
 def barras_agrupadas(eixo, valores: pd.DataFrame, cores: dict, nomes: dict) -> None:
+    """Barras lado a lado, uma cor por coluna, em um eixo."""
     largura = FRACAO_OCUPADA_PELAS_BARRAS / len(valores.columns)
     posicoes = np.arange(len(valores))
     for indice, coluna in enumerate(valores.columns):
@@ -397,6 +439,7 @@ def barras_agrupadas(eixo, valores: pd.DataFrame, cores: dict, nomes: dict) -> N
 
 
 def figura_macros(macros: pd.DataFrame) -> Figure:
+    """Macros de D9 por estratégia e grupo."""
     figura = Figure(
         figsize=(POLEGADAS_POR_PAINEL * len(MACROS), ALTURA_FIGURA), layout="constrained"
     )
@@ -419,6 +462,7 @@ def figura_macros(macros: pd.DataFrame) -> Figure:
 
 
 def figura_caminhada(resultados: pd.DataFrame, piso: pd.DataFrame) -> Figure:
+    """Caminhada do AG em cada refeição e fração de refeições no piso."""
     figura = Figure(figsize=(3 * POLEGADAS_POR_PAINEL, ALTURA_FIGURA), layout="constrained")
     por_tipo, no_piso_do_simulador = figura.subplots(1, 2)
     d9 = resultados[(resultados["estrategia"] == "ag") & (resultados["dia"] == DIA_ALVO)]
@@ -449,6 +493,7 @@ def figura_caminhada(resultados: pd.DataFrame, piso: pd.DataFrame) -> Figure:
 
 
 def figura_mudanca(mudanca: pd.DataFrame) -> Figure:
+    """Fração de pratos trocados em relação ao hábito, por dia."""
     figura = Figure(figsize=(LARGURA_FIGURA_MUDANCA, ALTURA_FIGURA), layout="constrained")
     eixo = figura.subplots()
     mudanca.index = [f"D{d}" for d in mudanca.index]
@@ -465,6 +510,7 @@ def figura_mudanca(mudanca: pd.DataFrame) -> Figure:
 
 
 def figura_frentes(resultados: pd.DataFrame, destaque: list[int]) -> Figure:
+    """Frente de Pareto de cada participante em destaque."""
     figura = Figure(
         figsize=(POLEGADAS_POR_PAINEL * len(destaque), ALTURA_FIGURA), layout="constrained"
     )
@@ -507,6 +553,7 @@ def figura_frentes(resultados: pd.DataFrame, destaque: list[int]) -> Figure:
 
 
 def figura_planos(resultados: pd.DataFrame, destaque: list[int]) -> Figure:
+    """Melhor plano do AG de cada participante em destaque, com as fotos."""
     figura = Figure(figsize=(LARGURA_GRADE, ALTURA_GRADE * len(destaque)), layout="constrained")
     subfiguras = np.atleast_1d(figura.subfigures(len(destaque), 1))
     for subfigura, participante in zip(subfiguras, destaque, strict=True):
@@ -526,6 +573,16 @@ def figura_planos(resultados: pd.DataFrame, destaque: list[int]) -> Figure:
 
 
 def gerar(resultados: pd.DataFrame, curvas: pd.DataFrame, pasta: Path = PASTA_FIGURAS) -> dict:
+    """Gera e grava todas as figuras.
+
+    Args:
+        resultados: Tabela de `resultados.parquet`.
+        curvas: Tabela de `curvas.parquet`.
+        pasta: Destino dos PNGs.
+
+    Returns:
+        Dicionário `nome -> caminho gravado`.
+    """
     destaque = vitrine(planos(resultados).groupby("participante")["grupo"].first())
     figuras = {
         "curvas_reais": figura_curvas(curvas, destaque),
@@ -546,6 +603,7 @@ def gerar(resultados: pd.DataFrame, curvas: pd.DataFrame, pasta: Path = PASTA_FI
 
 
 def imprimir(resultados: pd.DataFrame) -> None:
+    """Imprime as tabelas de resumo no terminal."""
     colunas_tabela = [
         "participantes",
         "iauc_d9",
@@ -587,6 +645,7 @@ def imprimir(resultados: pd.DataFrame) -> None:
 
 
 def main() -> None:
+    """Lê os resultados, imprime as tabelas e grava as figuras."""
     parser = argparse.ArgumentParser(description="Gera as figuras a partir dos resultados.")
     parser.add_argument("--pasta", type=Path, default=PASTA_FIGURAS)
     args = parser.parse_args()

@@ -1,3 +1,11 @@
+"""Tabela de refeições com a resposta glicêmica de 2 horas.
+
+Calcula a iAUC de cada refeição com janela limpa e cobertura suficiente do sensor,
+os minutos ativos na primeira hora e o resumo de cada dia.
+
+Autores: Joaquim Germano Félix, Miguel Mochizuki Silva
+"""
+
 from pathlib import Path
 
 import numpy as np
@@ -31,6 +39,16 @@ MACROS = ["carbo", "proteina", "gordura", "fibra", "kcal"]
 
 
 def calcular_iauc(minutos: np.ndarray, glicose: np.ndarray, base: float) -> float:
+    """Área incremental sob a curva de glicose acima da base, pela regra do trapézio.
+
+    Args:
+        minutos: Instantes da curva em minutos, em ordem crescente.
+        glicose: Glicose em mg/dL em cada instante.
+        base: Glicose de referência em mg/dL. Só a área acima dela conta.
+
+    Returns:
+        iAUC em mg/dL·min.
+    """
     alturas = np.asarray(glicose, dtype=float) - base
     larguras = np.diff(minutos)
     trechos = zip(larguras, alturas[:-1], alturas[1:], strict=True)
@@ -38,6 +56,13 @@ def calcular_iauc(minutos: np.ndarray, glicose: np.ndarray, base: float) -> floa
 
 
 def area_acima_da_base(largura: float, altura_inicial: float, altura_final: float) -> float:
+    """Área acima da base de um trecho reto entre duas leituras.
+
+    Args:
+        largura: Duração do trecho em minutos.
+        altura_inicial: Glicose menos a base no início do trecho.
+        altura_final: Glicose menos a base no fim do trecho.
+    """
     if altura_inicial >= 0 and altura_final >= 0:
         return largura * (altura_inicial + altura_final) / 2
     if altura_inicial <= 0 and altura_final <= 0:
@@ -50,11 +75,23 @@ def area_acima_da_base(largura: float, altura_inicial: float, altura_final: floa
 
 
 def janela_limpa(instantes_refeicoes: pd.DatetimeIndex, inicio: pd.Timestamp) -> bool:
+    """Verdadeiro se nenhuma outra refeição começa dentro da janela de 2 horas."""
     seguintes = (instantes_refeicoes > inicio) & (instantes_refeicoes <= inicio + JANELA)
     return not seguintes.any()
 
 
 def resposta(nativas: pd.Series, grade: pd.Series, inicio: pd.Timestamp) -> dict | None:
+    """Mede a resposta de glicose de 2 horas depois de uma refeição.
+
+    Args:
+        nativas: Leituras reais do sensor, sem a interpolação.
+        grade: Série interpolada minuto a minuto, usada para medir a cobertura.
+        inicio: Instante da refeição.
+
+    Returns:
+        Dicionário com `base`, `iauc` e `pico`, ou `None` se a cobertura for
+        insuficiente ou as leituras vizinhas estiverem longe das bordas da janela.
+    """
     fim = inicio + JANELA
     cobertura = grade[inicio:fim].notna().mean()
     antes = nativas[:inicio]
@@ -74,6 +111,11 @@ def resposta(nativas: pd.Series, grade: pd.Series, inicio: pd.Timestamp) -> dict
 def curva_de_2_horas(
     leituras: pd.Series, inicio: pd.Timestamp, base: float
 ) -> tuple[np.ndarray, np.ndarray]:
+    """Recorta a curva da janela, com a base no início e a glicose interpolada no fim.
+
+    Returns:
+        Minutos e glicose da curva, prontos para `calcular_iauc`.
+    """
     minutos = ((leituras.index - inicio) / pd.Timedelta(minutes=1)).to_numpy()
     glicose = leituras.to_numpy()
     dentro = (minutos > 0) & (minutos < MINUTOS_JANELA)
@@ -84,6 +126,11 @@ def curva_de_2_horas(
 
 
 def minutos_ativos(tabela: pd.DataFrame, inicio: pd.Timestamp) -> float:
+    """Minutos com METs acima do limiar na primeira hora depois da refeição.
+
+    Returns:
+        A contagem, ou NaN se não houver medida de METs na janela.
+    """
     janela = tabela[inicio + pd.Timedelta(minutes=1) : inicio + JANELA_ATIVIDADE]
     if janela["mets"].isna().all():
         return np.nan
@@ -91,6 +138,12 @@ def minutos_ativos(tabela: pd.DataFrame, inicio: pd.Timestamp) -> float:
 
 
 def dia_do_estudo(dias: pd.DataFrame, inicio: pd.Timestamp) -> int | None:
+    """Número do dia do estudo em que a refeição caiu.
+
+    Returns:
+        `DIA_ANTES_DO_ESTUDO` antes de D1, o número do dia, ou `None` se o dia foi
+        descartado.
+    """
     data = inicio.normalize()
     if data < dias["data"].min():
         return DIA_ANTES_DO_ESTUDO
@@ -101,6 +154,10 @@ def dia_do_estudo(dias: pd.DataFrame, inicio: pd.Timestamp) -> int | None:
 def refeicoes_participante(
     participante: int, tabela: pd.DataFrame, dias: pd.DataFrame
 ) -> pd.DataFrame:
+    """Monta as linhas de refeição de um participante, com iAUC do Dexcom e do Libre.
+
+    Pula lanches, dias descartados, janelas com outra refeição e janelas sem cobertura.
+    """
     nativas = {sensor: leitura.leituras_nativas(tabela[sensor]) for sensor in ("dexcom", "libre")}
     registros = tabela[tabela["refeicao"].notna()]
     linhas = []
@@ -133,6 +190,7 @@ def refeicoes_participante(
 
 
 def resumo_dias(participante: int, tabela: pd.DataFrame, dias: pd.DataFrame) -> pd.DataFrame:
+    """Resume cada dia válido: kcal, proteína, glicose média e glicose de jejum do CGM."""
     principais = tabela[tabela["refeicao"].isin(leitura.TIPOS_REFEICAO.values())]
     dexcom = leitura.leituras_nativas(tabela["dexcom"])
     jejum = dexcom.between_time(*JEJUM, inclusive="left")
@@ -148,6 +206,11 @@ def resumo_dias(participante: int, tabela: pd.DataFrame, dias: pd.DataFrame) -> 
 
 
 def montar_tabelas() -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Lê todos os participantes e monta as tabelas `refeicoes` e `dias`.
+
+    Returns:
+        Tupla `(refeicoes, dias)` no formato do esquema.
+    """
     grupos = leitura.ler_grupos()
     refeicoes, dias = [], []
     for participante in leitura.participantes():
@@ -161,10 +224,12 @@ def montar_tabelas() -> tuple[pd.DataFrame, pd.DataFrame]:
 
 
 def montar_refeicoes() -> pd.DataFrame:
+    """Atalho para a tabela `refeicoes` de `montar_tabelas`."""
     return montar_tabelas()[0]
 
 
 def main() -> None:
+    """Grava `refeicoes.parquet` e `dias.parquet` em `artefatos/`."""
     refeicoes, dias = montar_tabelas()
     ARTEFATOS.mkdir(exist_ok=True)
     refeicoes.to_parquet(ARTEFATOS / "refeicoes.parquet", index=False)

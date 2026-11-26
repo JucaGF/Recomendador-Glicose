@@ -1,3 +1,9 @@
+"""Testes da recomendação (`recomendar`) e das camadas de avaliação (`experimentos` e
+`figuras`).
+
+Autores: Joaquim Germano Félix, Miguel Mochizuki Silva
+"""
+
 import itertools
 import json
 

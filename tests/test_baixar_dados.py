@@ -1,3 +1,8 @@
+"""Testes do script de download do CGMacros (`baixar_dados`).
+
+Autores: Joaquim Germano Félix, Miguel Mochizuki Silva
+"""
+
 import hashlib
 import os
 import subprocess
